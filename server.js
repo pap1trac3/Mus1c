@@ -113,10 +113,20 @@ function groupRetrievedChunks(documents) {
 }
 
 /**
- * Sends the compiled prompt & retrieved context to OpenAI Chat Completions,
- * returning structured JSON: { style_prompt, structured_lyrics }.
+ * Streaming is opt-in via `stream: true` or an Accept header requesting SSE.
+ * Matched as a substring because clients commonly send a list of accepted
+ * types rather than the bare type.
  */
-async function generateMozartOutput(params) {
+function wantsEventStream(req) {
+  if (req.body?.stream === true) return true;
+  return (req.headers.accept || '').includes('text/event-stream');
+}
+
+/**
+ * Builds the chat messages for a generation request. Shared by the buffered
+ * and streaming paths so the two can never drift apart.
+ */
+function buildMozartMessages(params) {
   const { genre, bpm, key, vocal_timbre, acoustics, theme, context } = params;
 
   const systemPrompt = `You are Mozart AI, an expert AI music producer and vocal arranger. You generate prompts for AI music generation platforms (such as Suno or Udio) from a set of musical parameters and reference lyric context.
@@ -146,21 +156,17 @@ ${context && context.trim().length > 0 ? context : 'No reference context availab
 
 Return the JSON object now.`;
 
-  const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.85,
-  });
+  return [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt },
+  ];
+}
 
-  const raw = completion.choices[0]?.message?.content || '{}';
-
+/** Normalizes a raw model response into the documented output shape. */
+function parseMozartOutput(raw) {
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw || '{}');
   } catch (err) {
     throw new Error('Failed to parse Mozart AI generation output as JSON');
   }
@@ -169,6 +175,50 @@ Return the JSON object now.`;
     style_prompt: parsed.style_prompt || '',
     structured_lyrics: parsed.structured_lyrics || '',
   };
+}
+
+/**
+ * Sends the compiled prompt & retrieved context to OpenAI Chat Completions,
+ * returning structured JSON: { style_prompt, structured_lyrics }.
+ */
+async function generateMozartOutput(params) {
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
+    messages: buildMozartMessages(params),
+    response_format: { type: 'json_object' },
+    temperature: 0.85,
+  });
+
+  return parseMozartOutput(completion.choices[0]?.message?.content);
+}
+
+/**
+ * Streaming counterpart of generateMozartOutput: invokes `onToken` for each
+ * delta as it arrives and returns the same parsed shape once complete.
+ * The returned stream's controller is handed to `onStart` so the caller can
+ * abort the upstream request when the client disconnects.
+ */
+async function generateMozartOutputStream(params, onToken, onStart) {
+  const stream = await openai.chat.completions.create({
+    model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
+    messages: buildMozartMessages(params),
+    response_format: { type: 'json_object' },
+    temperature: 0.85,
+    stream: true,
+  });
+
+  if (onStart) onStart(stream);
+
+  let raw = '';
+  for await (const chunk of stream) {
+    const token = chunk.choices[0]?.delta?.content || '';
+    if (token) {
+      raw += token;
+      onToken(token);
+    }
+  }
+
+  return parseMozartOutput(raw);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +301,9 @@ app.post('/api/generate', asyncHandler(async (req, res) => {
 
   const limit = Number.isInteger(retrieval_limit) && retrieval_limit > 0 ? retrieval_limit : 8;
 
-  const { output, retrieved, sections } = await attempt('Failed to generate Mozart AI output', async () => {
+  // Retrieval runs before any response is committed, so a failure here still
+  // returns the standard JSON error shape via the centralized handler.
+  const { retrieved, sections, context } = await attempt('Failed to generate Mozart AI output', async () => {
     const queryText = [genre, theme, vocal_timbre, acoustics]
       .filter((part) => typeof part === 'string' && part.trim().length > 0)
       .join(', ');
@@ -264,25 +316,84 @@ app.post('/api/generate', asyncHandler(async (req, res) => {
       .map((section) => `[Source: ${section.document_id}]\n${section.text}`)
       .join('\n\n');
 
-    const output = await generateMozartOutput({
-      genre,
-      bpm,
-      key,
-      vocal_timbre,
-      acoustics,
-      theme,
-      context,
+    return { retrieved, sections, context };
+  });
+
+  const generationParams = { genre, bpm, key, vocal_timbre, acoustics, theme, context };
+
+  if (!wantsEventStream(req)) {
+    const output = await attempt('Failed to generate Mozart AI output', () =>
+      generateMozartOutput(generationParams)
+    );
+
+    return res.json({
+      style_prompt: output.style_prompt,
+      structured_lyrics: output.structured_lyrics,
+      retrieved_chunks: retrieved.length,
+      retrieved_documents: sections.length,
     });
+  }
 
-    return { output, retrieved, sections };
+  // --- SSE path -----------------------------------------------------------
+  // Past this point the status line is already committed, so failures are
+  // reported as an `error` event rather than through the JSON error handler.
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // don't let nginx buffer the stream
+  });
+  res.flushHeaders();
+
+  let upstream = null;
+  let clientGone = false;
+  // Must be res, not req: for a POST, req 'close' fires as soon as the body
+  // has been consumed, which is immediately — res 'close' before
+  // writableEnded is the actual client-disconnect signal.
+  res.on('close', () => {
+    if (res.writableEnded) return;
+    clientGone = true;
+    // Stop consuming (and paying for) tokens the client will never receive.
+    if (upstream) upstream.controller.abort();
   });
 
-  res.json({
-    style_prompt: output.style_prompt,
-    structured_lyrics: output.structured_lyrics,
-    retrieved_chunks: retrieved.length,
-    retrieved_documents: sections.length,
-  });
+  try {
+    const output = await generateMozartOutputStream(
+      generationParams,
+      (token) => {
+        if (!clientGone) res.write(`data: ${JSON.stringify({ token })}\n\n`);
+      },
+      (stream) => {
+        upstream = stream;
+        if (clientGone) stream.controller.abort();
+      }
+    );
+
+    if (clientGone) return;
+
+    // Final event mirrors the non-streaming response body, so clients never
+    // have to reassemble and parse the token stream themselves.
+    res.write(
+      `event: complete\ndata: ${JSON.stringify({
+        style_prompt: output.style_prompt,
+        structured_lyrics: output.structured_lyrics,
+        retrieved_chunks: retrieved.length,
+        retrieved_documents: sections.length,
+      })}\n\n`
+    );
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (err) {
+    if (clientGone) return;
+    console.error('Failed to generate Mozart AI output (stream):', err);
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        error: 'Failed to generate Mozart AI output',
+        details: err.message,
+      })}\n\n`
+    );
+    res.end();
+  }
 }));
 
 app.use((req, res) => {
