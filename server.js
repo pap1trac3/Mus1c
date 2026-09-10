@@ -6,6 +6,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const OpenAI = require('openai');
 const { DataAPIClient } = require('@datastax/astra-db-ts');
+const { VaultRepository } = require('./lib/vaultRepository');
+const { AppError, attempt, asyncHandler } = require('./lib/errors');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -38,6 +40,7 @@ const db = dataApiClient.db(
   process.env.ASTRA_DB_KEYSPACE ? { keyspace: process.env.ASTRA_DB_KEYSPACE } : undefined
 );
 const lyricVault = db.collection(COLLECTION_NAME);
+const vaultRepo = new VaultRepository(lyricVault);
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -190,82 +193,71 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.post('/api/ingest', async (req, res) => {
-  try {
-    const { transcript, metadata = {} } = req.body || {};
+app.post('/api/ingest', asyncHandler(async (req, res) => {
+  const { transcript, metadata = {} } = req.body || {};
 
-    if (typeof transcript !== 'string' || transcript.trim().length === 0) {
-      return res.status(400).json({ error: 'transcript is required and must be a non-empty string' });
-    }
-
-    const documentId = metadata.document_id || crypto.randomUUID();
-    const chunks = chunkText(transcript);
-
-    if (chunks.length === 0) {
-      return res.status(400).json({ error: 'transcript did not produce any chunks' });
-    }
-
-    const documents = [];
-    for (let i = 0; i < chunks.length; i++) {
-      const embedding = await createEmbedding(chunks[i]);
-      documents.push({
-        $vector: embedding,
-        transcript: chunks[i],
-        metadata: {
-          ...metadata,
-          document_id: documentId,
-          chunk_index: i,
-          total_chunks: chunks.length,
-        },
-      });
-    }
-
-    await lyricVault.insertMany(documents);
-
-    res.status(201).json({
-      success: true,
-      document_id: documentId,
-      chunks_ingested: chunks.length,
-    });
-  } catch (err) {
-    console.error('Error in /api/ingest:', err);
-    res.status(500).json({ error: 'Failed to ingest transcript', details: err.message });
+  if (typeof transcript !== 'string' || transcript.trim().length === 0) {
+    return res.status(400).json({ error: 'transcript is required and must be a non-empty string' });
   }
-});
 
-app.post('/api/generate', async (req, res) => {
-  try {
-    const {
-      genre,
-      bpm,
-      key,
-      vocal_timbre,
-      acoustics,
-      theme,
-      retrieval_limit,
-    } = req.body || {};
+  const documentId = metadata.document_id || crypto.randomUUID();
+  const chunks = chunkText(transcript);
 
-    if (!genre && !theme) {
-      return res.status(400).json({ error: 'At least one of "genre" or "theme" is required' });
-    }
+  if (chunks.length === 0) {
+    return res.status(400).json({ error: 'transcript did not produce any chunks' });
+  }
 
-    const limit = Number.isInteger(retrieval_limit) && retrieval_limit > 0 ? retrieval_limit : 8;
+  await attempt('Failed to ingest transcript', async () => {
+    // Chunks are embedded in parallel (Promise.all preserves input order,
+    // so embeddings[i] still corresponds to chunks[i]) instead of one
+    // sequential OpenAI round-trip per chunk.
+    const embeddings = await Promise.all(chunks.map((chunk) => createEmbedding(chunk)));
 
+    const documents = chunks.map((chunk, i) => ({
+      $vector: embeddings[i],
+      transcript: chunk,
+      metadata: {
+        ...metadata,
+        document_id: documentId,
+        chunk_index: i,
+        total_chunks: chunks.length,
+      },
+    }));
+
+    await vaultRepo.insertChunks(documents);
+  });
+
+  res.status(201).json({
+    success: true,
+    document_id: documentId,
+    chunks_ingested: chunks.length,
+  });
+}));
+
+app.post('/api/generate', asyncHandler(async (req, res) => {
+  const {
+    genre,
+    bpm,
+    key,
+    vocal_timbre,
+    acoustics,
+    theme,
+    retrieval_limit,
+  } = req.body || {};
+
+  if (!genre && !theme) {
+    return res.status(400).json({ error: 'At least one of "genre" or "theme" is required' });
+  }
+
+  const limit = Number.isInteger(retrieval_limit) && retrieval_limit > 0 ? retrieval_limit : 8;
+
+  const { output, retrieved, sections } = await attempt('Failed to generate Mozart AI output', async () => {
     const queryText = [genre, theme, vocal_timbre, acoustics]
       .filter((part) => typeof part === 'string' && part.trim().length > 0)
       .join(', ');
 
     const queryEmbedding = await createEmbedding(queryText);
-
-    const cursor = lyricVault.find(
-      {},
-      {
-        sort: { $vector: queryEmbedding },
-        limit,
-        includeSimilarity: true,
-      }
-    );
-    const retrieved = await cursor.toArray();
+    const retrieved = await vaultRepo.findSimilar(queryEmbedding, { limit });
 
     const sections = groupRetrievedChunks(retrieved);
     const context = sections
@@ -282,24 +274,32 @@ app.post('/api/generate', async (req, res) => {
       context,
     });
 
-    res.json({
-      style_prompt: output.style_prompt,
-      structured_lyrics: output.structured_lyrics,
-      retrieved_chunks: retrieved.length,
-      retrieved_documents: sections.length,
-    });
-  } catch (err) {
-    console.error('Error in /api/generate:', err);
-    res.status(500).json({ error: 'Failed to generate Mozart AI output', details: err.message });
-  }
-});
+    return { output, retrieved, sections };
+  });
+
+  res.json({
+    style_prompt: output.style_prompt,
+    structured_lyrics: output.structured_lyrics,
+    retrieved_chunks: retrieved.length,
+    retrieved_documents: sections.length,
+  });
+}));
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// Centralized error handling: reproduces each route's original response
+// shape from a single place instead of duplicating try/catch/log/respond
+// in every handler. AppError carries the route-specific public message;
+// anything else (a genuinely unexpected failure) falls back to the same
+// generic response the old catch-all middleware returned.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  if (err instanceof AppError) {
+    console.error(`${err.publicMessage}:`, err.cause);
+    return res.status(500).json({ error: err.publicMessage, details: err.cause?.message });
+  }
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
