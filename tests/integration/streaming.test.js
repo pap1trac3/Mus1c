@@ -115,6 +115,7 @@ describe('POST /api/generate - SSE streaming', () => {
       structured_lyrics: OUTPUT.structured_lyrics,
       retrieved_chunks: 1,
       retrieved_documents: 1,
+      degraded: false,
     });
   });
 
@@ -147,6 +148,7 @@ describe('POST /api/generate - SSE streaming', () => {
       structured_lyrics: OUTPUT.structured_lyrics,
       retrieved_chunks: 1,
       retrieved_documents: 1,
+      degraded: false,
     });
     expect(mockChatCreate.mock.calls[0][0].stream).toBeUndefined();
   });

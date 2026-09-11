@@ -13,6 +13,8 @@ const { ingestSchema, generateSchema, validateBody } = require('./lib/validation
 const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
 const { logger, httpLogger } = require('./lib/logger');
 const { createReadinessChecker } = require('./lib/readiness');
+const { withRetry } = require('./lib/retry');
+const { createHeartbeat } = require('./lib/sse');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -329,23 +331,34 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
 
   req.log.info({ genre, theme, limit, streaming }, 'generation requested');
 
-  // Retrieval runs before any response is committed, so a failure here still
-  // returns the standard JSON error shape via the centralized handler.
-  const { retrieved, sections, context } = await attempt('Failed to generate Mozart AI output', async () => {
+  // Retrieval is best-effort: context improves the result but isn't required
+  // to produce one, so an upstream failure degrades to an unguided generation
+  // rather than failing the request. The embedding call is left to the OpenAI
+  // SDK's own retry; only the Astra call is wrapped, as it has none.
+  let retrieved = [];
+  let sections = [];
+  let context = '';
+  let degraded = false;
+
+  try {
     const queryText = [genre, theme, vocal_timbre, acoustics]
       .filter((part) => typeof part === 'string' && part.trim().length > 0)
       .join(', ');
 
     const queryEmbedding = await createEmbedding(queryText);
-    const retrieved = await vaultRepo.findSimilar(queryEmbedding, { limit });
+    retrieved = await withRetry(() => vaultRepo.findSimilar(queryEmbedding, { limit }), {
+      log: req.log,
+      label: 'vault retrieval',
+    });
 
-    const sections = groupRetrievedChunks(retrieved);
-    const context = sections
+    sections = groupRetrievedChunks(retrieved);
+    context = sections
       .map((section) => `[Source: ${section.document_id}]\n${section.text}`)
       .join('\n\n');
-
-    return { retrieved, sections, context };
-  });
+  } catch (err) {
+    degraded = true;
+    req.log.warn({ err: err.message }, 'retrieval failed; generating without vault context');
+  }
 
   const retrievalMs = Date.now() - startedAt;
   req.log.info(
@@ -368,6 +381,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
         generation_ms: Date.now() - generationStartedAt,
         total_ms: Date.now() - startedAt,
         usage: output.usage,
+        degraded,
       },
       'generation complete'
     );
@@ -377,6 +391,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
       structured_lyrics: output.structured_lyrics,
       retrieved_chunks: retrieved.length,
       retrieved_documents: sections.length,
+      degraded,
     });
   }
 
@@ -390,6 +405,13 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     'X-Accel-Buffering': 'no', // don't let nginx buffer the stream
   });
   res.flushHeaders();
+
+  // Keeps the connection alive through long gaps between tokens; cleared on
+  // completion, failure, or disconnect. Tunable because proxy idle timeouts
+  // vary widely (Cloudflare ~100s, some load balancers 30s).
+  const stopHeartbeat = createHeartbeat(res, {
+    intervalMs: Number(process.env.SSE_HEARTBEAT_MS) || undefined,
+  });
 
   let upstream = null;
   let clientGone = false;
@@ -425,6 +447,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     );
 
     if (clientGone) {
+      stopHeartbeat();
       req.log.warn(
         { ttft_ms: ttftMs, total_ms: Date.now() - startedAt },
         'client disconnected before completion'
@@ -441,23 +464,27 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
         total_ms: Date.now() - startedAt,
         stream_chunks: output.chunks,
         usage: output.usage,
+        degraded,
       },
       'generation complete'
     );
 
     // Final event mirrors the non-streaming response body, so clients never
     // have to reassemble and parse the token stream themselves.
+    stopHeartbeat();
     res.write(
       `event: complete\ndata: ${JSON.stringify({
         style_prompt: output.style_prompt,
         structured_lyrics: output.structured_lyrics,
         retrieved_chunks: retrieved.length,
         retrieved_documents: sections.length,
+        degraded,
       })}\n\n`
     );
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err) {
+    stopHeartbeat();
     if (clientGone) return;
     req.log.error({ err, ttft_ms: ttftMs, total_ms: Date.now() - startedAt }, 'generation stream failed');
     res.write(
