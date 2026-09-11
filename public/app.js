@@ -369,7 +369,8 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     const result = await response.json();
     $('badge-feel').textContent = 'Feel: ' + result.style_dna.feel;
     $('badge-cadence').textContent = 'Cadence: ' + result.style_dna.cadence;
-    $('badge-imagery').textContent = 'Imagery: ' + result.style_dna.metaphor_domain;
+    const domains = result.style_dna.metaphor_domains || [];
+    $('badge-imagery').textContent = 'Imagery: ' + (domains.length ? domains.join(', ') : '—');
     $('reel-lyrics').textContent = result.generated_lyrics;
     $('reel-results').hidden = false;
 
