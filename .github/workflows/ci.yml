@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Test, build & scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload-sarif writes to the Security tab
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Pinned only so audit output doesn't shift with the runner's npm.
+      # No `npm ci` needed: audit resolves advisories from package-lock.json.
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # -----------------------------------------------------------------
+      # 1. Dependency vulnerabilities
+      # -----------------------------------------------------------------
+      - name: Audit production dependencies (blocking)
+        run: npm audit --audit-level=moderate --omit=dev
+
+      - name: Audit all dependencies (informational)
+        run: npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------
+      # 2. Test suite, executed inside the image via `RUN npm test`
+      # -----------------------------------------------------------------
+      - name: Run Jest suite inside the container
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # load: true publishes the image to the local daemon so Trivy can
+      # scan it by tag without a registry round-trip.
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runner
+          load: true
+          tags: mozart-ai:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # -----------------------------------------------------------------
+      # 3. Container vulnerabilities — pass 1: full report, never blocks
+      # -----------------------------------------------------------------
+      - name: Trivy scan (full report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: mozart-ai:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          vuln-type: os,library
+          exit-code: '0'
+
+      - name: Upload Trivy results to the Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      # -----------------------------------------------------------------
+      # 4. Container vulnerabilities — pass 2: gate on fixable HIGH/CRITICAL
+      # -----------------------------------------------------------------
+      - name: Trivy scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: mozart-ai:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
