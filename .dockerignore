@@ -4,6 +4,9 @@ npm-debug.log
 .env.example
 .git
 .github
+# The separator sidecar builds from its own context (services/separator).
+# The API image never copies it, so it should not be shipped to the daemon.
+services
 .gitignore
 coverage
 README.md
