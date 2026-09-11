@@ -120,7 +120,7 @@
   .player { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
   .player-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .player-controls button { width: auto; padding: 8px 14px; }
-  .player-controls button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
   .volume { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
   .volume input { width: 140px; }
   .volume label, .volume span { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
@@ -134,6 +134,43 @@
     display: block;
   }
   @media (max-width: 520px) { .volume { margin-left: 0; width: 100%; } .volume input { flex: 1; } }
+
+  .reel-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+  @media (max-width: 860px) { .reel-grid { grid-template-columns: minmax(0, 1fr); } }
+  .drop-zone {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 26px 16px;
+    text-align: center;
+    cursor: pointer;
+    background: var(--panel-2);
+    transition: border-color .15s, background .15s;
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop-zone .icon { font-size: 1.6rem; display: block; margin-bottom: 6px; }
+  .drop-zone p { margin: 0; font-size: 0.85rem; color: var(--muted); }
+  .file-name { margin-top: 10px !important; color: var(--text) !important; font-size: 0.8rem !important; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .badge {
+    background: var(--accent-soft);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 0.75rem;
+  }
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    display: inline-block;
+    vertical-align: -3px;
+    margin-right: 8px;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -231,6 +268,47 @@
         </div>
         <canvas id="visualizer-canvas" width="800" height="90"></canvas>
         <div id="audio-status" class="status" role="status" aria-live="polite">Generate a track to enable playback.</div>
+      </div>
+    </section>
+    <section class="full">
+      <h2>Reel lyric deconstructor</h2>
+      <p class="hint">
+        Upload a clip to extract its stylistic qualities — feel, cadence, imagery — and
+        write original lyrics on your own topic in that style. The transcript is used only
+        for analysis: it is never stored or returned.
+      </p>
+
+      <div class="reel-grid">
+        <div>
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0"
+               aria-label="Choose or drop a reel clip">
+            <input type="file" id="reel-file-input" accept="audio/*,video/*" hidden>
+            <span class="icon" aria-hidden="true">♪</span>
+            <p>Drop a clip here, or <strong>click to browse</strong><br>mp3, mp4, m4a, wav, webm — up to 25MB</p>
+            <p id="file-name-display" class="file-name"></p>
+          </div>
+
+          <div class="field" style="margin-top:14px">
+            <label for="reel-topic">New song topic</label>
+            <input id="reel-topic" placeholder="e.g. late nights in the studio, moving on" autocomplete="off">
+          </div>
+
+          <button id="analyze-reel-btn" type="button" disabled>Analyze &amp; generate lyrics</button>
+          <div id="reel-status" class="status" role="status" aria-live="polite"></div>
+        </div>
+
+        <div>
+          <div id="reel-results" hidden>
+            <div class="badges">
+              <span id="badge-feel" class="badge">Feel: —</span>
+              <span id="badge-cadence" class="badge">Cadence: —</span>
+              <span id="badge-imagery" class="badge">Imagery: —</span>
+            </div>
+            <h3>Original lyrics</h3>
+            <pre id="reel-lyrics"></pre>
+            <button id="copy-lyrics-btn" type="button" class="secondary">Copy lyrics</button>
+          </div>
+        </div>
       </div>
     </section>
   </main>

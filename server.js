@@ -16,6 +16,14 @@ const { createReadinessChecker } = require('./lib/readiness');
 const { withRetry } = require('./lib/retry');
 const { createHeartbeat } = require('./lib/sse');
 const { sanitizeMelody, clampTempo, MAX_EVENTS } = require('./lib/melody');
+const {
+  reelUpload,
+  analysisSystemPrompt,
+  parseAnalysis,
+  MAX_UPLOAD_BYTES,
+  TRANSCRIBE_MODEL,
+} = require('./lib/reel');
+const { toFile } = require('openai');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -522,6 +530,86 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     );
     res.end();
   }
+}));
+
+/**
+ * Transcribes an uploaded clip, derives abstract style features from it, and
+ * writes original lyrics on the caller's topic.
+ *
+ * The transcript is deliberately never persisted or returned: it is a verbatim
+ * copy of someone else's work, and only the derived style is needed downstream.
+ */
+app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
+  reelUpload(req, res, (err) => {
+    if (!err) return next();
+
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `Clip is too large. The transcription API accepts up to ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB — trim the clip or export audio only.`,
+      });
+    }
+    if (err.code === 'UNSUPPORTED_MEDIA') {
+      return res.status(415).json({ error: 'Unsupported file type. Use mp3, mp4, m4a, wav, or webm.' });
+    }
+    return res.status(400).json({ error: 'Upload failed', details: err.message });
+  });
+}, asyncHandler(async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No reel file provided.' });
+  }
+
+  const topic = typeof req.body.topic === 'string' ? req.body.topic.trim().slice(0, 300) : '';
+  if (!topic) {
+    return res.status(400).json({ error: 'A topic for the new lyrics is required.' });
+  }
+
+  const startedAt = Date.now();
+  req.log.info(
+    { bytes: req.file.size, mimetype: req.file.mimetype, topic_length: topic.length },
+    'reel analysis requested'
+  );
+
+  const transcript = await attempt('Failed to transcribe the clip', async () => {
+    const upload = await toFile(req.file.buffer, req.file.originalname || 'reel.mp4', {
+      type: req.file.mimetype,
+    });
+    const result = await openai.audio.transcriptions.create({
+      file: upload,
+      model: TRANSCRIBE_MODEL,
+    });
+    return (result.text || '').trim();
+  });
+
+  const transcribedMs = Date.now() - startedAt;
+  // Length only — the transcript itself stays out of the logs.
+  req.log.info({ transcribe_ms: transcribedMs, transcript_chars: transcript.length }, 'clip transcribed');
+
+  const analysis = await attempt('Failed to analyze the clip', async () => {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: analysisSystemPrompt },
+        {
+          role: 'user',
+          content: `Topic for the new lyrics: ${topic}\n\nTranscript of the clip:\n${transcript || '(no speech detected)'}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.85,
+    });
+    return parseAnalysis(completion.choices[0]?.message?.content);
+  });
+
+  req.log.info(
+    { transcribe_ms: transcribedMs, total_ms: Date.now() - startedAt },
+    'reel analysis complete'
+  );
+
+  res.json({
+    style_dna: analysis.style_dna,
+    generated_lyrics: analysis.generated_lyrics,
+    transcript_chars: transcript.length,
+  });
 }));
 
 app.use((req, res) => {

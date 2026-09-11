@@ -281,3 +281,118 @@ $('volume-slider').addEventListener('input', (event) => {
   $('volume-value').textContent = db + ' dB';
   window.audioEngine.setVolume(db);
 });
+
+// ---------------------------------------------------------------------------
+// Reel lyric deconstructor
+// ---------------------------------------------------------------------------
+
+const MAX_REEL_BYTES = 25 * 1024 * 1024;
+
+let selectedReel = null;
+
+function describeSize(bytes) {
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function selectReel(file) {
+  const status = $('reel-status');
+
+  // Checked here as well as server-side, so an oversized clip fails instantly
+  // instead of after a long upload that the API would reject anyway.
+  if (file.size > MAX_REEL_BYTES) {
+    selectedReel = null;
+    $('analyze-reel-btn').disabled = true;
+    $('file-name-display').textContent = '';
+    setStatus(status, file.name + ' is ' + describeSize(file.size) + ' — the 25MB limit is set by the transcription API. Trim the clip or export audio only.', 'err');
+    return;
+  }
+
+  selectedReel = file;
+  $('file-name-display').textContent = file.name + ' (' + describeSize(file.size) + ')';
+  $('analyze-reel-btn').disabled = false;
+  setStatus(status, '');
+}
+
+const dropZone = $('drop-zone');
+const reelInput = $('reel-file-input');
+
+dropZone.addEventListener('click', () => reelInput.click());
+dropZone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    reelInput.click();
+  }
+});
+
+dropZone.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', (event) => {
+  event.preventDefault();
+  dropZone.classList.remove('drag-over');
+  if (event.dataTransfer.files.length) selectReel(event.dataTransfer.files[0]);
+});
+
+reelInput.addEventListener('change', (event) => {
+  if (event.target.files.length) selectReel(event.target.files[0]);
+});
+
+$('analyze-reel-btn').addEventListener('click', async () => {
+  const status = $('reel-status');
+  const button = $('analyze-reel-btn');
+  const topic = $('reel-topic').value.trim();
+
+  if (!selectedReel) return;
+  if (!topic) {
+    setStatus(status, 'Enter a topic for the new lyrics.', 'err');
+    return;
+  }
+
+  const form = new FormData();
+  form.append('reel', selectedReel);
+  form.append('topic', topic);
+
+  button.disabled = true;
+  $('reel-results').hidden = true;
+  status.className = 'status busy';
+  status.innerHTML = '';
+  status.appendChild(Object.assign(document.createElement('span'), { className: 'spinner' }));
+  status.appendChild(document.createTextNode('Transcribing and deconstructing…'));
+
+  try {
+    // No Content-Type header: the browser must set the multipart boundary.
+    const response = await fetch('/api/analyze-reel', { method: 'POST', body: form });
+    if (!response.ok) throw await asError(response);
+
+    const result = await response.json();
+    $('badge-feel').textContent = 'Feel: ' + result.style_dna.feel;
+    $('badge-cadence').textContent = 'Cadence: ' + result.style_dna.cadence;
+    $('badge-imagery').textContent = 'Imagery: ' + result.style_dna.metaphor_domain;
+    $('reel-lyrics').textContent = result.generated_lyrics;
+    $('reel-results').hidden = false;
+
+    setStatus(
+      status,
+      result.transcript_chars > 0
+        ? 'Done — analyzed ' + result.transcript_chars + ' characters of speech.'
+        : 'Done — no speech detected, lyrics written from the topic alone.',
+      'ok'
+    );
+  } catch (err) {
+    setStatus(status, err.message, 'err', err.details);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('copy-lyrics-btn').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('reel-lyrics').textContent);
+    setStatus($('reel-status'), 'Lyrics copied.', 'ok');
+  } catch (err) {
+    // Clipboard access needs a secure context and can be denied.
+    setStatus($('reel-status'), 'Copy failed — select the text manually.', 'err');
+  }
+});
