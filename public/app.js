@@ -367,12 +367,8 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     if (!response.ok) throw await asError(response);
 
     const result = await response.json();
-    $('badge-feel').textContent = 'Feel: ' + result.style_dna.feel;
-    $('badge-cadence').textContent = 'Cadence: ' + result.style_dna.cadence;
-    const domains = result.style_dna.metaphor_domains || [];
-    $('badge-imagery').textContent = 'Imagery: ' + (domains.length ? domains.join(', ') : '—');
-    $('reel-lyrics').textContent = result.generated_lyrics;
-    $('reel-results').hidden = false;
+    renderReelResult(result.style_dna, result.generated_lyrics);
+    rememberReelResult(result.style_dna, result.generated_lyrics);
 
     setStatus(
       status,
@@ -388,12 +384,117 @@ $('analyze-reel-btn').addEventListener('click', async () => {
   }
 });
 
-$('copy-lyrics-btn').addEventListener('click', async () => {
+/** Paints the style badges and lyrics. Shared by a fresh result and a restore. */
+function renderReelResult(styleDna, lyrics) {
+  const dna = styleDna || {};
+  $('badge-feel').textContent = dna.feel || 'Unknown';
+  $('badge-cadence').textContent = dna.cadence || 'Unknown';
+
+  // One pill per domain. Built with textContent, never innerHTML: these
+  // strings come from the model and must not be parsed as markup.
+  const container = $('reel-domains');
+  const domains = Array.isArray(dna.metaphor_domains) ? dna.metaphor_domains : [];
+  const pills = (domains.length ? domains : ['None identified']).map((domain) => {
+    const pill = document.createElement('span');
+    pill.className = 'badge badge-domain';
+    pill.textContent = domain;
+    return pill;
+  });
+  container.replaceChildren(...pills);
+
+  $('reel-lyrics').textContent = lyrics || '';
+  $('reel-results').hidden = false;
+}
+
+// localStorage is per-viewer convenience only, and every accessor is guarded:
+// it throws outright in some privacy modes rather than returning null.
+const REEL_CACHE_KEY = 'mozart.reel.lastResult';
+const LYRIC_PREFS_KEY = 'mozart.reel.lyricPrefs';
+
+function rememberReelResult(styleDna, lyrics) {
   try {
-    await navigator.clipboard.writeText($('reel-lyrics').textContent);
-    setStatus($('reel-status'), 'Lyrics copied.', 'ok');
+    localStorage.setItem(REEL_CACHE_KEY, JSON.stringify({ styleDna, lyrics }));
+  } catch (err) {
+    /* storage unavailable or full — the feature still works, just not across reloads */
+  }
+}
+
+function restoreReelResult() {
+  try {
+    const cached = localStorage.getItem(REEL_CACHE_KEY);
+    if (!cached) return;
+    const { styleDna, lyrics } = JSON.parse(cached);
+    if (lyrics) {
+      renderReelResult(styleDna, lyrics);
+      setStatus($('reel-status'), 'Showing your last result from this browser.');
+    }
+  } catch (err) {
+    /* unreadable or stale shape — start clean rather than surfacing an error */
+  }
+}
+
+// --- lyric formatting toggles -------------------------------------------
+
+function applyLyricPrefs(prefs) {
+  const pre = $('reel-lyrics');
+  pre.classList.toggle('large-font', !!prefs.large);
+  pre.classList.toggle('spacious-lines', !!prefs.spacious);
+  $('font-size-toggle').setAttribute('aria-pressed', String(!!prefs.large));
+  $('line-height-toggle').setAttribute('aria-pressed', String(!!prefs.spacious));
+}
+
+function readLyricPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(LYRIC_PREFS_KEY)) || {};
+  } catch (err) {
+    return {};
+  }
+}
+
+function toggleLyricPref(key) {
+  const prefs = readLyricPrefs();
+  prefs[key] = !prefs[key];
+  applyLyricPrefs(prefs);
+  try {
+    localStorage.setItem(LYRIC_PREFS_KEY, JSON.stringify(prefs));
+  } catch (err) {
+    /* preference just won't persist */
+  }
+}
+
+$('font-size-toggle').addEventListener('click', () => toggleLyricPref('large'));
+$('line-height-toggle').addEventListener('click', () => toggleLyricPref('spacious'));
+
+$('copy-lyrics-btn').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  const lyrics = $('reel-lyrics').textContent;
+  if (!lyrics) return;
+
+  try {
+    await navigator.clipboard.writeText(lyrics);
+    button.textContent = 'Copied';
+    setTimeout(() => { button.textContent = 'Copy'; }, 1800);
   } catch (err) {
     // Clipboard access needs a secure context and can be denied.
     setStatus($('reel-status'), 'Copy failed — select the text manually.', 'err');
   }
 });
+
+$('download-lyrics-btn').addEventListener('click', () => {
+  const lyrics = $('reel-lyrics').textContent;
+  if (!lyrics) return;
+
+  const url = URL.createObjectURL(new Blob([lyrics], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'mozart-lyrics-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.txt';
+  // Firefox ignores a click on an anchor that isn't in the document.
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoking synchronously can cancel the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+});
+
+applyLyricPrefs(readLyricPrefs());
+restoreReelResult();

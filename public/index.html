@@ -135,6 +135,51 @@
   }
   @media (max-width: 520px) { .volume { margin-left: 0; width: 100%; } .volume input { flex: 1; } }
 
+  .dna-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .dna-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .dna-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
+    min-width: 108px;
+    flex-shrink: 0;
+  }
+  .badge-feel { background: rgba(200, 164, 94, 0.15); color: #dcc188; border-color: rgba(200, 164, 94, 0.3); }
+  .badge-cadence { background: rgba(95, 185, 139, 0.15); color: #7fcfa4; border-color: rgba(95, 185, 139, 0.3); }
+  .badge-domain { background: rgba(122, 162, 247, 0.14); color: #93b4f5; border-color: rgba(122, 162, 247, 0.3); }
+  .domains-flex { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+
+  .lyric-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .lyric-toolbar h3 { margin: 0; flex: 1; min-width: 0; }
+  .btn-icon {
+    width: auto;
+    margin-top: 0;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-icon[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  #reel-lyrics { transition: font-size .15s, line-height .15s; }
+  #reel-lyrics.large-font { font-size: 15px; }
+  #reel-lyrics.spacious-lines { line-height: 2; }
+
   .reel-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
   @media (max-width: 860px) { .reel-grid { grid-template-columns: minmax(0, 1fr); } }
   .drop-zone {
@@ -299,14 +344,31 @@
 
         <div>
           <div id="reel-results" hidden>
-            <div class="badges">
-              <span id="badge-feel" class="badge">Feel: —</span>
-              <span id="badge-cadence" class="badge">Cadence: —</span>
-              <span id="badge-imagery" class="badge">Imagery: —</span>
+            <div class="dna-summary">
+              <div class="dna-row">
+                <span class="dna-label">Feel</span>
+                <span id="badge-feel" class="badge badge-feel">—</span>
+              </div>
+              <div class="dna-row">
+                <span class="dna-label">Cadence</span>
+                <span id="badge-cadence" class="badge badge-cadence">—</span>
+              </div>
+              <div class="dna-row">
+                <span class="dna-label">Metaphor domains</span>
+                <div id="reel-domains" class="domains-flex"></div>
+              </div>
             </div>
-            <h3>Original lyrics</h3>
+
+            <div class="lyric-toolbar">
+              <h3>Original lyrics</h3>
+              <button id="font-size-toggle" type="button" class="btn-icon"
+                      aria-pressed="false" title="Toggle larger text">Aa</button>
+              <button id="line-height-toggle" type="button" class="btn-icon"
+                      aria-pressed="false" title="Toggle line spacing">&#8801;</button>
+              <button id="copy-lyrics-btn" type="button" class="btn-icon">Copy</button>
+              <button id="download-lyrics-btn" type="button" class="btn-icon">Export .txt</button>
+            </div>
             <pre id="reel-lyrics"></pre>
-            <button id="copy-lyrics-btn" type="button" class="secondary">Copy lyrics</button>
           </div>
         </div>
       </div>
