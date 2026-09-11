@@ -428,9 +428,9 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     if (result.source === 'pasted') {
       analyzed = 'Done — read from the ' + result.transcript_chars + ' characters you pasted.';
     } else if (result.transcript_chars > 0) {
-      analyzed = 'Done — transcribed ' + result.transcript_chars + ' characters.';
+      analyzed = 'Done — transcribed ' + result.transcript_chars + ' characters' + describeSource(result) + '.';
     } else {
-      analyzed = 'Done — no vocals detected, lyrics written from the topic alone.';
+      analyzed = 'Done — no vocals detected' + describeSource(result) + ', lyrics written from the topic alone.';
     }
 
     // The server keeps the analysis even when it declines to remember it, so
@@ -458,6 +458,29 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     syncAnalyzeButton();
   }
 });
+
+/**
+ * Says whether the vocal was isolated before transcription. Without this, a
+ * poor transcript is unreadable as a diagnosis: you cannot tell whether the
+ * model heard a clean stem and still struggled, or was handed the whole mix.
+ * Silent when no separator is configured — that is the default, and naming
+ * an absent feature on every run would be noise.
+ */
+function describeSource(result) {
+  if (result.vocals_isolated) return ' from the isolated vocal';
+  switch (result.separation_skipped) {
+    case 'timeout':
+      return ' from the full mix (isolating the vocal took too long)';
+    case 'unreachable':
+    case 'empty_stem':
+      return ' from the full mix (vocal isolation unavailable)';
+    default:
+      // 'not_configured', or an http_<status> the server already logged.
+      return result.separation_skipped && result.separation_skipped !== 'not_configured'
+        ? ' from the full mix (vocal isolation failed)'
+        : '';
+  }
+}
 
 /** Paints the style badges and lyrics. Shared by a fresh result and a restore. */
 function renderReelResult(styleDna, lyrics) {

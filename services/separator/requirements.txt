@@ -1,0 +1,7 @@
+# Pinned: an unpinned torch pulls a multi-gigabyte CUDA build by default.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0
+demucs==4.1.0
+fastapi==0.121.2
+uvicorn[standard]==0.41.0
+python-multipart==0.0.22

@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+
+# Python bytecode from the separator sidecar
+__pycache__/
+*.py[cod]

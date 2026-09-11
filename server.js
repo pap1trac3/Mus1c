@@ -17,6 +17,7 @@ const { withRetry } = require('./lib/retry');
 const { createHeartbeat } = require('./lib/sse');
 const { sanitizeMelody, clampTempo, MAX_EVENTS } = require('./lib/melody');
 const { normalizeLyricSheet } = require('./lib/lyricFormat');
+const { isolateVocals } = require('./lib/vocalSeparation');
 const {
   reelUpload,
   analysisSystemPrompt,
@@ -627,11 +628,24 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
   );
 
   let transcript = referenceLyrics;
+  let separation = null;
 
   if (!referenceLyrics) {
+    // Isolate the vocal before transcribing. Tuned parameters help on clean
+    // speech but cannot recover a vocal buried under a beat — the model is
+    // hearing the mix. This falls back to the original audio whenever the
+    // separator is absent or unwell, so it can never cost a caller their
+    // result.
+    separation = await isolateVocals({
+      buffer: req.file.buffer,
+      filename: req.file.originalname,
+      mimetype: req.file.mimetype,
+      log: req.log,
+    });
+
     transcript = await attempt('Failed to transcribe the clip', async () => {
-      const upload = await toFile(req.file.buffer, req.file.originalname || 'reel.mp4', {
-        type: req.file.mimetype,
+      const upload = await toFile(separation.buffer, separation.filename, {
+        type: separation.mimetype,
       });
       const result = await openai.audio.transcriptions.create(
         buildTranscriptionParams({
@@ -665,6 +679,9 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
       transcript_chars: transcript.length,
       source,
       quality: quality.verdict,
+      vocals_isolated: separation?.separated ?? null,
+      separation_skipped: separation?.reason ?? null,
+      separation_ms: separation?.ms ?? null,
     },
     source === 'pasted' ? 'reference lyrics supplied' : 'clip transcribed'
   );
@@ -737,6 +754,10 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
     generated_lyrics: analysis.generated_lyrics,
     transcript_chars: transcript.length,
     source,
+    // Whether the vocal was isolated before transcription. A caller comparing
+    // two poor results needs to know which of them even got a clean stem.
+    vocals_isolated: separation ? separation.separated : null,
+    separation_skipped: separation ? separation.reason : null,
     // Enough to tell a good read from a bad one without ever returning the
     // words: how much was captured, and this service's own verdict on it.
     transcript_quality: quality.verdict,
