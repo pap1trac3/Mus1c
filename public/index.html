@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mozart AI — Music &amp; Vocal Prompt Generator</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #c8a45e;
+    --accent-soft: rgba(200, 164, 94, 0.12);
+    --danger: #e5646d;
+    --ok: #5fb98b;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 28px 20px 20px;
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+  }
+  header h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
+  header h1 span { color: var(--accent); }
+  header p { margin: 6px 0 0; color: var(--muted); font-size: 0.9rem; }
+
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 22px 16px 60px;
+    display: grid;
+    gap: 18px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px;
+    min-width: 0;
+  }
+  section h2 { margin: 0 0 4px; font-size: 1rem; }
+  section .hint { margin: 0 0 14px; color: var(--muted); font-size: 0.82rem; }
+  .full { grid-column: 1 / -1; }
+
+  label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 5px; }
+  input, textarea, button {
+    font: inherit;
+    color: var(--text);
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+  }
+  textarea { resize: vertical; min-height: 120px; }
+  input:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  .row { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
+  @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+  .field { margin-bottom: 12px; min-width: 0; }
+
+  button {
+    background: var(--accent);
+    color: #1a1200;
+    border: none;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  .status { margin-top: 12px; font-size: 0.85rem; min-height: 1.2em; }
+  .status.err { color: var(--danger); }
+  .status.ok { color: var(--ok); }
+  .status.busy { color: var(--accent); }
+  .status ul { margin: 6px 0 0; padding-left: 18px; }
+
+  .output { margin-top: 16px; }
+  .output h3 {
+    margin: 0 0 6px;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+  pre {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin: 0 0 14px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    max-height: 340px;
+    overflow: auto;
+  }
+  pre:empty::before { content: "—"; color: var(--muted); }
+  .cursor::after {
+    content: "▋";
+    color: var(--accent);
+    animation: blink 1s steps(2, start) infinite;
+  }
+  @keyframes blink { to { visibility: hidden; } }
+  .meta { color: var(--muted); font-size: 0.78rem; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Mozart <span>AI</span></h1>
+    <p>Music &amp; vocal prompt generator — retrieval-augmented, streamed live</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>Generate</h2>
+      <p class="hint">Provide a genre or a theme (at least one is required).</p>
+      <form id="generate-form" novalidate>
+        <div class="row">
+          <div>
+            <label for="genre">Genre</label>
+            <input id="genre" name="genre" placeholder="opera, synthwave…" autocomplete="off">
+          </div>
+          <div>
+            <label for="theme">Theme</label>
+            <input id="theme" name="theme" placeholder="a thunderstorm at sea" autocomplete="off">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="bpm">BPM (30–300)</label>
+            <input id="bpm" name="bpm" type="number" min="30" max="300" placeholder="120">
+          </div>
+          <div>
+            <label for="key">Key</label>
+            <input id="key" name="key" placeholder="D minor" autocomplete="off">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="vocal_timbre">Vocal timbre</label>
+            <input id="vocal_timbre" name="vocal_timbre" placeholder="airy mezzo-soprano" autocomplete="off">
+          </div>
+          <div>
+            <label for="acoustics">Acoustics</label>
+            <input id="acoustics" name="acoustics" placeholder="cathedral reverb" autocomplete="off">
+          </div>
+        </div>
+        <div class="field">
+          <label for="retrieval_limit">Retrieval limit (1–20)</label>
+          <input id="retrieval_limit" name="retrieval_limit" type="number" min="1" max="20" placeholder="8">
+        </div>
+        <button id="generate-btn" type="submit">Generate</button>
+        <div id="generate-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section>
+      <h2>Ingest</h2>
+      <p class="hint">Add lyrics or a transcript to the vault for retrieval.</p>
+      <form id="ingest-form" novalidate>
+        <div class="field">
+          <label for="document_id">Document ID (optional)</label>
+          <input id="document_id" name="document_id" placeholder="auto-generated if blank" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="transcript">Transcript / lyrics</label>
+          <textarea id="transcript" name="transcript" placeholder="Paste lyrics or a transcript…"></textarea>
+        </div>
+        <button id="ingest-btn" type="submit">Ingest</button>
+        <div id="ingest-status" class="status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section class="full">
+      <h2>Output</h2>
+      <p class="hint">Tokens stream in as the model writes; the parsed result replaces them when complete.</p>
+      <div class="output">
+        <h3>Live stream</h3>
+        <pre id="stream-out"></pre>
+        <h3>Style prompt</h3>
+        <pre id="style-out"></pre>
+        <h3>Structured lyrics</h3>
+        <pre id="lyrics-out"></pre>
+        <div id="retrieval-meta" class="meta"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- External file, not inline: helmet's CSP sets script-src 'self'. -->
+  <script src="app.js"></script>
+</body>
+</html>

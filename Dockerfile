@@ -14,6 +14,7 @@ RUN npm ci --omit=dev
 # Copy application source code
 COPY server.js ./
 COPY lib ./lib
+COPY public ./public
 
 # ==========================================
 # STAGE 2: Production Runtime
@@ -31,6 +32,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/server.js ./
 COPY --from=builder /app/lib ./lib
+COPY --from=builder /app/public ./public
 
 # Use non-root node user provided by alpine image
 USER node

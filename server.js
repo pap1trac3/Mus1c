@@ -1,6 +1,7 @@
 require('dotenv').config({ quiet: true });
 
 const crypto = require('crypto');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -8,6 +9,8 @@ const OpenAI = require('openai');
 const { DataAPIClient } = require('@datastax/astra-db-ts');
 const { VaultRepository } = require('./lib/vaultRepository');
 const { AppError, attempt, asyncHandler } = require('./lib/errors');
+const { ingestSchema, generateSchema, validateBody } = require('./lib/validation');
+const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -231,6 +234,13 @@ app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json({ limit: '1mb' }));
 
+// __dirname, not a bare 'public', so the server works regardless of cwd.
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Broad ceiling on API traffic; /health stays unlimited so container
+// healthchecks never consume the budget.
+app.use('/api', apiLimiter);
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -243,12 +253,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.post('/api/ingest', asyncHandler(async (req, res) => {
-  const { transcript, metadata = {} } = req.body || {};
-
-  if (typeof transcript !== 'string' || transcript.trim().length === 0) {
-    return res.status(400).json({ error: 'transcript is required and must be a non-empty string' });
-  }
+app.post('/api/ingest', strictLimiter, validateBody(ingestSchema), asyncHandler(async (req, res) => {
+  const { transcript, metadata = {} } = req.body;
 
   const documentId = metadata.document_id || crypto.randomUUID();
   const chunks = chunkText(transcript);
@@ -284,20 +290,8 @@ app.post('/api/ingest', asyncHandler(async (req, res) => {
   });
 }));
 
-app.post('/api/generate', asyncHandler(async (req, res) => {
-  const {
-    genre,
-    bpm,
-    key,
-    vocal_timbre,
-    acoustics,
-    theme,
-    retrieval_limit,
-  } = req.body || {};
-
-  if (!genre && !theme) {
-    return res.status(400).json({ error: 'At least one of "genre" or "theme" is required' });
-  }
+app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHandler(async (req, res) => {
+  const { genre, bpm, key, vocal_timbre, acoustics, theme, retrieval_limit } = req.body;
 
   const limit = Number.isInteger(retrieval_limit) && retrieval_limit > 0 ? retrieval_limit : 8;
 
