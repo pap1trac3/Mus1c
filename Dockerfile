@@ -1,7 +1,7 @@
 # ==========================================
 # STAGE 1: Build & Install Dependencies
 # ==========================================
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ COPY public ./public
 # --omit=dev. RUN, not CMD: the suite has to execute during
 # `docker build --target test` so a failure fails the build. A CMD would
 # only run on container start, letting the build pass with a red suite.
-FROM node:20-alpine AS test
+FROM node:22-alpine AS test
 
 WORKDIR /app
 
@@ -44,7 +44,7 @@ RUN npm test
 # Not derived from `test`, so the default `docker build .` (and compose)
 # still produce the runtime image without running the suite; CI gates
 # explicitly via --target test.
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 

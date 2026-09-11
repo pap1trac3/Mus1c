@@ -23,10 +23,10 @@ jobs:
 
       # Pinned only so audit output doesn't shift with the runner's npm.
       # No `npm ci` needed: audit resolves advisories from package-lock.json.
-      - name: Set up Node.js 20
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # -----------------------------------------------------------------
       # 1. Dependency vulnerabilities
