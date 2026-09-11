@@ -350,9 +350,12 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     return;
   }
 
+  const remember = $('remember-reel').checked;
+
   const form = new FormData();
   form.append('reel', selectedReel);
   form.append('topic', topic);
+  form.append('remember', String(remember));
 
   button.disabled = true;
   $('reel-results').hidden = true;
@@ -370,13 +373,22 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     renderReelResult(result.style_dna, result.generated_lyrics);
     rememberReelResult(result.style_dna, result.generated_lyrics);
 
-    setStatus(
-      status,
+    const analyzed =
       result.transcript_chars > 0
         ? 'Done — analyzed ' + result.transcript_chars + ' characters of speech.'
-        : 'Done — no speech detected, lyrics written from the topic alone.',
-      'ok'
-    );
+        : 'Done — no speech detected, lyrics written from the topic alone.';
+
+    // The server keeps the analysis even when the vault write fails, so say
+    // which of the two actually happened rather than assuming both did.
+    let kept = '';
+    if (result.remembered) {
+      kept = ' Style kept — later generations will draw on it.';
+      loadStyleMemory();
+    } else if (remember) {
+      kept = " Couldn't save the style to the vault, so this one stays a one-off.";
+    }
+
+    setStatus(status, analyzed + kept, result.remembered || !remember ? 'ok' : 'err');
   } catch (err) {
     setStatus(status, err.message, 'err', err.details);
   } finally {
@@ -498,3 +510,130 @@ $('download-lyrics-btn').addEventListener('click', () => {
 
 applyLyricPrefs(readLyricPrefs());
 restoreReelResult();
+
+// ---------------------------------------------------------------------------
+// Style memory — what the vault has learned from reels so far
+// ---------------------------------------------------------------------------
+
+function describeWhen(iso) {
+  if (!iso) return '';
+  const learnedAt = new Date(iso);
+  if (Number.isNaN(learnedAt.getTime())) return '';
+  return learnedAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** One card per learned profile. Every value is model- or user-supplied, so
+ *  it is written with textContent and never parsed as markup. */
+function renderStyleMemory(data) {
+  const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+  const count = typeof data.count === 'number' ? data.count : profiles.length;
+
+  $('memory-count').textContent =
+    count === 0
+      ? 'Nothing learned yet'
+      : (data.count_capped ? count + '+' : count) + (count === 1 ? ' reel learned' : ' reels learned');
+
+  const list = $('memory-list');
+
+  if (profiles.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'memory-empty';
+    empty.textContent = 'Analyze a reel above and its style will appear here.';
+    list.replaceChildren(empty);
+    return;
+  }
+
+  list.replaceChildren(...profiles.map((profile) => {
+    const item = document.createElement('li');
+    item.className = 'memory-item';
+
+    const top = document.createElement('div');
+    top.className = 'memory-top';
+
+    const source = document.createElement('span');
+    source.className = 'memory-source';
+    source.textContent = profile.source_name || 'reel clip';
+    top.appendChild(source);
+
+    const when = describeWhen(profile.learned_at);
+    if (when) {
+      const stamp = document.createElement('span');
+      stamp.className = 'memory-when';
+      stamp.textContent = when;
+      top.appendChild(stamp);
+    }
+    item.appendChild(top);
+
+    const feel = document.createElement('span');
+    feel.className = 'badge badge-feel';
+    feel.textContent = profile.feel || 'Unknown';
+    item.appendChild(feel);
+
+    const cadence = document.createElement('div');
+    cadence.className = 'memory-cadence';
+    cadence.textContent = profile.cadence || 'Unknown';
+    item.appendChild(cadence);
+
+    const domains = Array.isArray(profile.metaphor_domains) ? profile.metaphor_domains : [];
+    if (domains.length) {
+      const pills = document.createElement('div');
+      pills.className = 'domains-flex';
+      pills.replaceChildren(...domains.map((domain) => {
+        const pill = document.createElement('span');
+        pill.className = 'badge badge-domain';
+        pill.textContent = domain;
+        return pill;
+      }));
+      item.appendChild(pills);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'memory-actions';
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'btn-icon';
+    forget.textContent = 'Forget';
+    forget.addEventListener('click', () => forgetProfile(profile.id, forget));
+    actions.appendChild(forget);
+    item.appendChild(actions);
+
+    return item;
+  }));
+}
+
+async function loadStyleMemory() {
+  const status = $('memory-status');
+
+  try {
+    const response = await fetch('/api/style-memory');
+    if (!response.ok) throw await asError(response);
+
+    renderStyleMemory(await response.json());
+    setStatus(status, '');
+  } catch (err) {
+    $('memory-count').textContent = 'Style memory unavailable';
+    setStatus(status, err.message, 'err', err.details);
+  }
+}
+
+async function forgetProfile(id, button) {
+  if (!id) return;
+
+  button.disabled = true;
+  button.textContent = 'Forgetting…';
+
+  try {
+    const response = await fetch('/api/style-memory/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (!response.ok) throw await asError(response);
+
+    await loadStyleMemory();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = 'Forget';
+    setStatus($('memory-status'), err.message, 'err', err.details);
+  }
+}
+
+$('refresh-memory-btn').addEventListener('click', loadStyleMemory);
+
+loadStyleMemory();

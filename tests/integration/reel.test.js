@@ -6,11 +6,13 @@ const request = require('supertest');
 
 const mockTranscribe = jest.fn();
 const mockChatCreate = jest.fn();
+const mockEmbed = jest.fn();
+const mockInsertChunks = jest.fn();
 
 jest.mock('../../lib/vaultRepository', () => ({
   VaultRepository: jest.fn().mockImplementation(() => ({
     ping: jest.fn().mockResolvedValue({}),
-    insertChunks: jest.fn().mockResolvedValue({}),
+    insertChunks: mockInsertChunks,
     findSimilar: jest.fn().mockResolvedValue([]),
   })),
 }));
@@ -18,7 +20,7 @@ jest.mock('../../lib/vaultRepository', () => ({
 jest.mock('openai', () => {
   const MockOpenAI = jest.fn().mockImplementation(() => ({
     models: { retrieve: jest.fn().mockResolvedValue({}) },
-    embeddings: { create: jest.fn().mockResolvedValue({ data: [{ embedding: [0.1] }] }) },
+    embeddings: { create: mockEmbed },
     chat: { completions: { create: mockChatCreate } },
     audio: { transcriptions: { create: mockTranscribe } },
   }));
@@ -37,6 +39,8 @@ const ANALYSIS = {
 };
 
 beforeEach(() => {
+  mockEmbed.mockReset().mockResolvedValue({ data: [{ embedding: [0.1] }] });
+  mockInsertChunks.mockReset().mockResolvedValue({});
   mockTranscribe.mockReset().mockResolvedValue({ text: 'some transcribed speech' });
   mockChatCreate.mockReset().mockResolvedValue({
     choices: [{ message: { content: JSON.stringify(ANALYSIS) } }],
@@ -74,6 +78,20 @@ describe('POST /api/analyze-reel', () => {
     expect(JSON.stringify(res.body)).not.toContain('copyrighted words');
     expect(res.body.transcript_chars).toBe(40);
     expect(res.body.transcript).toBeUndefined();
+  });
+
+  it('never writes the source transcript to the vault either', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'the actual copyrighted words of the song' });
+
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    const [documents] = mockInsertChunks.mock.calls[0];
+    expect(JSON.stringify(documents)).not.toContain('copyrighted words');
+    // The transcript is not embedded either — only the derived profile is.
+    expect(JSON.stringify(mockEmbed.mock.calls)).not.toContain('copyrighted words');
   });
 
   it('passes the topic to the model and asks it not to reuse source phrases', async () => {
@@ -219,5 +237,97 @@ describe('POST /api/analyze-reel', () => {
       cadence: 'Unknown',
       metaphor_domains: [],
     });
+  });
+});
+
+describe('POST /api/analyze-reel — remembering the reel', () => {
+  it('writes a style profile into the vault so later generations can use it', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'late nights in the studio')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.remembered).toBe(true);
+    expect(typeof res.body.profile_id).toBe('string');
+
+    expect(mockInsertChunks).toHaveBeenCalledTimes(1);
+    const [documents] = mockInsertChunks.mock.calls[0];
+    expect(documents).toHaveLength(1);
+
+    const [profile] = documents;
+    expect(profile.metadata.kind).toBe('style_profile');
+    expect(profile.metadata.document_id).toBe(res.body.profile_id);
+    expect(profile.metadata.source_name).toBe('clip.mp3');
+    expect(profile.metadata.topic).toBe('late nights in the studio');
+    expect(profile.metadata.feel).toBe(ANALYSIS.feel);
+    expect(profile.metadata.metaphor_domains).toEqual(ANALYSIS.metaphor_domains);
+    expect(profile.$vector).toEqual([0.1]);
+    expect(profile.text).toContain(ANALYSIS.cadence);
+    expect(profile.text).toContain('Original words here');
+  });
+
+  it('embeds the profile text, so it is retrievable by style as well as theme', async () => {
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    const [{ input }] = mockEmbed.mock.calls[0];
+    expect(input).toContain(ANALYSIS.feel);
+    expect(input).toContain(ANALYSIS.cadence);
+    expect(input).toContain('Night driving');
+  });
+
+  it('honours an explicit opt-out', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('remember', 'false')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.remembered).toBe(false);
+    expect(res.body.profile_id).toBeNull();
+    expect(mockInsertChunks).not.toHaveBeenCalled();
+    expect(mockEmbed).not.toHaveBeenCalled();
+  });
+
+  it('remembers by default when the field is absent', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.body.remembered).toBe(true);
+  });
+
+  it('still returns the analysis when the vault write fails', async () => {
+    mockInsertChunks.mockRejectedValue(new Error('astra is down'));
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    // The caller already paid for a transcription and a completion; losing the
+    // memory must not lose them the result.
+    expect(res.statusCode).toBe(200);
+    expect(res.body.generated_lyrics).toBe(ANALYSIS.generated_lyrics);
+    expect(res.body.remembered).toBe(false);
+    expect(res.body.profile_id).toBeNull();
+  }, 15000);
+
+  it('still returns the analysis when embedding the profile fails', async () => {
+    mockEmbed.mockRejectedValue(new Error('embeddings unavailable'));
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.style_dna.feel).toBe(ANALYSIS.feel);
+    expect(res.body.remembered).toBe(false);
   });
 });

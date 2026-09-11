@@ -180,6 +180,55 @@
   #reel-lyrics.large-font { font-size: 15px; }
   #reel-lyrics.spacious-lines { line-height: 2; }
 
+  .remember-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .remember-toggle input { width: auto; margin: 2px 0 0; flex-shrink: 0; }
+  .remember-toggle label { margin: 0; font-size: inherit; color: inherit; cursor: pointer; }
+
+  .memory-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .memory-header h3 { margin: 0; flex: 1; min-width: 0; font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .memory-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  }
+  .memory-item {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .memory-item .memory-top { display: flex; align-items: baseline; gap: 8px; }
+  .memory-item .memory-source {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+  }
+  .memory-item .memory-when { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+  .memory-item .memory-cadence { font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
+  /* The badge hugs its text instead of stretching to the card's width, which
+     a column flex container would otherwise do to every child. */
+  .memory-item .badge-feel { align-self: flex-start; }
+  /* Pushed to the bottom so Forget sits on one line across the whole row,
+     however much cadence text a card carries. */
+  .memory-item .memory-actions { display: flex; justify-content: flex-end; margin-top: auto; }
+  .memory-empty { color: var(--muted); font-size: 0.85rem; margin: 0; }
+
   .reel-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
   @media (max-width: 860px) { .reel-grid { grid-template-columns: minmax(0, 1fr); } }
   .drop-zone {
@@ -319,8 +368,9 @@
       <h2>Reel lyric deconstructor</h2>
       <p class="hint">
         Upload a clip to extract its stylistic qualities — feel, cadence, imagery — and
-        write original lyrics on your own topic in that style. The transcript is used only
-        for analysis: it is never stored or returned.
+        write original lyrics on your own topic in that style. The clip's transcript is used
+        only for analysis and is never stored, returned, or logged — what gets kept is the
+        style it reveals, so later generations can draw on it.
       </p>
 
       <div class="reel-grid">
@@ -336,6 +386,14 @@
           <div class="field" style="margin-top:14px">
             <label for="reel-topic">New song topic</label>
             <input id="reel-topic" placeholder="e.g. late nights in the studio, moving on" autocomplete="off">
+          </div>
+
+          <div class="remember-toggle">
+            <input type="checkbox" id="remember-reel" checked>
+            <label for="remember-reel">
+              Keep this reel's style in the vault, so every later generation is shaped by it.
+              The clip's own words are never stored.
+            </label>
           </div>
 
           <button id="analyze-reel-btn" type="button" disabled>Analyze &amp; generate lyrics</button>
@@ -372,6 +430,22 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <section class="full">
+      <h2>Style memory</h2>
+      <p class="hint">
+        What the vault has learned from your reels. Each entry is a style fingerprint —
+        feel, cadence, imagery — plus the original lyrics written from it. Every generation
+        retrieves from here, so a reel keeps steering the output long after you upload it.
+      </p>
+
+      <div class="memory-header">
+        <h3 id="memory-count">Loading…</h3>
+        <button id="refresh-memory-btn" type="button" class="btn-icon">Refresh</button>
+      </div>
+      <div id="memory-status" class="status" role="status" aria-live="polite"></div>
+      <ul id="memory-list" class="memory-list"></ul>
     </section>
   </main>
 

@@ -6,7 +6,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const OpenAI = require('openai');
-const { DataAPIClient } = require('@datastax/astra-db-ts');
+const { DataAPIClient, TooManyDocumentsToCountError } = require('@datastax/astra-db-ts');
 const { VaultRepository } = require('./lib/vaultRepository');
 const { AppError, attempt, asyncHandler } = require('./lib/errors');
 const { ingestSchema, generateSchema, validateBody } = require('./lib/validation');
@@ -23,6 +23,15 @@ const {
   MAX_UPLOAD_BYTES,
   TRANSCRIBE_MODEL,
 } = require('./lib/reel');
+const {
+  STYLE_PROFILE_KIND,
+  LYRIC_KIND,
+  COUNT_UPPER_BOUND,
+  MAX_PROFILE_PAGE,
+  buildProfileText,
+  buildProfileDocument,
+  toProfileSummary,
+} = require('./lib/styleMemory');
 const { toFile } = require('openai');
 
 const COLLECTION_NAME = 'lyric_vault';
@@ -124,7 +133,10 @@ function groupRetrievedChunks(documents) {
 
     return {
       document_id: groupKey,
-      text: docs.map((d) => d.transcript).join(' '),
+      // Ingested chunks keep their text in `transcript`; learned reel style
+      // profiles keep theirs in `text`. Both are the document's text.
+      text: docs.map((d) => d.transcript ?? d.text ?? '').join(' '),
+      kind: docs[0].metadata?.kind || LYRIC_KIND,
     };
   });
 }
@@ -174,7 +186,9 @@ Vocal Timbre: ${vocal_timbre || 'unspecified'}
 Acoustics: ${acoustics || 'unspecified'}
 Theme: ${theme || 'unspecified'}
 
-Reference context retrieved from the lyric vault (use for inspiration, phrasing, and thematic continuity — do not copy verbatim):
+Reference context retrieved from the lyric vault (use for inspiration, phrasing, and thematic continuity — do not copy verbatim). Two kinds of block may appear:
+- [Learned style profile: ...] — the stylistic fingerprint of a reference clip this user has already fed the tool. Treat these as the house style: match their feel, cadence and metaphor domains.
+- [Source: ...] — a lyric excerpt from the vault, for phrasing and theme only.
 ${context && context.trim().length > 0 ? context : 'No reference context available.'}
 
 Return the JSON object now.`;
@@ -384,7 +398,11 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
 
     sections = groupRetrievedChunks(retrieved);
     context = sections
-      .map((section) => `[Source: ${section.document_id}]\n${section.text}`)
+      .map((section) =>
+        section.kind === STYLE_PROFILE_KIND
+          ? `[Learned style profile: ${section.document_id}]\n${section.text}`
+          : `[Source: ${section.document_id}]\n${section.text}`
+      )
       .join('\n\n');
   } catch (err) {
     degraded = true;
@@ -600,8 +618,45 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
     return parseAnalysis(completion.choices[0]?.message?.content);
   });
 
+  // What makes a reel more than a one-shot: the derived style and the lyrics
+  // written from it go into the same vault /api/generate retrieves from, so
+  // every later generation is steered by every reel fed in before it. The
+  // transcript still goes nowhere — only this service's own output is kept.
+  //
+  // Best-effort, on the same reasoning as retrieval: a failed vault write must
+  // not cost the caller an analysis they already paid a transcription and a
+  // completion for. `remembered: false` in the response says it didn't stick.
+  const remember = req.body.remember !== 'false' && req.body.remember !== false;
+  let profileId = null;
+
+  if (remember) {
+    try {
+      const profileText = buildProfileText({
+        style_dna: analysis.style_dna,
+        topic,
+        lyrics: analysis.generated_lyrics,
+      });
+      const profileDoc = buildProfileDocument({
+        vector: await createEmbedding(profileText),
+        style_dna: analysis.style_dna,
+        topic,
+        lyrics: analysis.generated_lyrics,
+        sourceName: req.file.originalname,
+      });
+
+      await withRetry(() => vaultRepo.insertChunks([profileDoc]), {
+        log: req.log,
+        label: 'style profile write',
+      });
+      profileId = profileDoc.metadata.document_id;
+      req.log.info({ profile_id: profileId }, 'style profile learned');
+    } catch (err) {
+      req.log.warn({ err: err.message }, 'failed to remember this reel; returning the analysis anyway');
+    }
+  }
+
   req.log.info(
-    { transcribe_ms: transcribedMs, total_ms: Date.now() - startedAt },
+    { transcribe_ms: transcribedMs, total_ms: Date.now() - startedAt, remembered: Boolean(profileId) },
     'reel analysis complete'
   );
 
@@ -609,7 +664,61 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
     style_dna: analysis.style_dna,
     generated_lyrics: analysis.generated_lyrics,
     transcript_chars: transcript.length,
+    remembered: Boolean(profileId),
+    profile_id: profileId,
   });
+}));
+
+// ---------------------------------------------------------------------------
+// Style memory: the profiles the vault has learned from reels so far.
+// ---------------------------------------------------------------------------
+
+app.get('/api/style-memory', asyncHandler(async (req, res) => {
+  const requested = Number.parseInt(req.query.limit, 10);
+  const limit =
+    Number.isInteger(requested) && requested > 0 ? Math.min(requested, MAX_PROFILE_PAGE) : 10;
+
+  const profiles = await attempt('Failed to read style memory', () =>
+    withRetry(() => vaultRepo.findProfiles({ limit }), { log: req.log, label: 'style memory listing' })
+  );
+
+  // The headline total is a nice-to-have, and the Data API refuses to count
+  // without a ceiling. Report "at least N" rather than make the page wait on
+  // a full scan — and rather than fail a listing that already succeeded.
+  let count = profiles.length;
+  let countCapped = false;
+  try {
+    count = await vaultRepo.countProfiles(COUNT_UPPER_BOUND);
+  } catch (err) {
+    const overCeiling =
+      err instanceof TooManyDocumentsToCountError || err?.name === 'TooManyDocumentsToCountError';
+    if (overCeiling) {
+      count = COUNT_UPPER_BOUND;
+      countCapped = true;
+    }
+    req.log.warn({ err: err.message, over_ceiling: overCeiling }, 'style profile count unavailable');
+  }
+
+  res.json({
+    count,
+    count_capped: countCapped,
+    profiles: profiles.map(toProfileSummary),
+  });
+}));
+
+app.delete('/api/style-memory/:id', strictLimiter, asyncHandler(async (req, res) => {
+  const id = String(req.params.id || '').slice(0, 200);
+
+  const result = await attempt('Failed to forget that style profile', () =>
+    vaultRepo.deleteProfile(id)
+  );
+
+  if (!result?.deletedCount) {
+    return res.status(404).json({ error: 'No learned style profile with that id.' });
+  }
+
+  req.log.info({ profile_id: id, deleted: result.deletedCount }, 'style profile forgotten');
+  res.json({ success: true, id, deleted: result.deletedCount });
 }));
 
 app.use((req, res) => {
