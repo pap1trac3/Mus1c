@@ -222,6 +222,17 @@ describe('learned profiles reaching the generation prompt', () => {
     expect(messages[1].content).toMatch(/match their feel, cadence and metaphor domains/i);
   });
 
+  it('tells the generator to break lyric lines rather than collapse a verse', async () => {
+    await request(app).post('/api/generate').send({ genre: 'lo-fi' });
+
+    const [{ messages }] = mockChatCreate.mock.calls[0];
+    const system = messages[0].content;
+
+    expect(system).toMatch(/ONE LYRIC LINE PER LINE/);
+    expect(system).toMatch(/unusable as a lyric sheet/i);
+    expect(system).toMatch(/section headers on their own line/i);
+  });
+
   it('counts a learned profile as a retrieved document', async () => {
     mockFindSimilar.mockResolvedValue([profileDoc()]);
 

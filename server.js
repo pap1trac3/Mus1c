@@ -16,6 +16,7 @@ const { createReadinessChecker } = require('./lib/readiness');
 const { withRetry } = require('./lib/retry');
 const { createHeartbeat } = require('./lib/sse');
 const { sanitizeMelody, clampTempo, MAX_EVENTS } = require('./lib/melody');
+const { normalizeLyricSheet } = require('./lib/lyricFormat');
 const {
   reelUpload,
   analysisSystemPrompt,
@@ -181,8 +182,9 @@ function buildMozartMessages(params) {
 
 You must return ONLY a JSON object with exactly four keys:
 - "style_prompt": a concise, comma-separated string of production/style tags (genre, tempo, instrumentation, vocal timbre, acoustics, mood) suitable for pasting directly into an AI music generator's style field.
-- "structured_lyrics": a full lyric sheet formatted for AI vocal synthesis, using:
-  - Bracketed section headers, e.g. [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], [Outro]
+- "structured_lyrics": a full lyric sheet formatted for AI vocal synthesis, as a single string carrying its own line breaks:
+  - ONE LYRIC LINE PER LINE, each ending with a newline. Never run several lines together into one long line — a verse packed onto one line is unusable as a lyric sheet.
+  - Bracketed section headers on their own line, e.g. [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], [Outro], with a blank line between sections
   - Bracketed performance/production tags inline where useful, e.g. [soft female vocal], [building energy], [whispered], [ad-lib]
   - Hyphenated melisma for held/stretched syllables, e.g. "be-au-ti-ful", "for-ev-er"
   - Micro-pauses represented with ellipses "..." to indicate short breath or rhythmic pauses
@@ -229,7 +231,7 @@ function parseMozartOutput(raw) {
 
   return {
     style_prompt: parsed.style_prompt || '',
-    structured_lyrics: parsed.structured_lyrics || '',
+    structured_lyrics: normalizeLyricSheet(parsed.structured_lyrics || ''),
     tempo_bpm: clampTempo(parsed.tempo_bpm),
     melody: sanitizeMelody(parsed.melody),
   };
