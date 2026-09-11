@@ -24,6 +24,11 @@ const {
   TRANSCRIBE_MODEL,
 } = require('./lib/reel');
 const {
+  buildTranscriptionParams,
+  assessTranscriptQuality,
+  parseKeywords,
+} = require('./lib/transcription');
+const {
   STYLE_PROFILE_KIND,
   LYRIC_KIND,
   COUNT_UPPER_BOUND,
@@ -36,6 +41,20 @@ const { toFile } = require('openai');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
+
+// Enough for a long verse-chorus-verse sheet; bounds what one analysis costs.
+const MAX_REFERENCE_LYRIC_CHARS = 8000;
+// Upper bound on a clip the 25MB cap could hold, so a bogus duration can't
+// make an empty transcript look like a good yield.
+const MAX_CLIP_SECONDS = 3600;
+
+/** The browser's reading of the clip's length — a hint, so validate it hard. */
+function clipSeconds(raw) {
+  const seconds = Number(raw);
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_CLIP_SECONDS) return null;
+  return seconds;
+}
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -572,7 +591,19 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
     return res.status(400).json({ error: 'Upload failed', details: err.message });
   });
 }, asyncHandler(async (req, res) => {
-  if (!req.file) {
+  // Pasted reference lyrics skip transcription entirely. Speech-to-text on
+  // sung vocals over a beat is the least reliable link in this chain, so when
+  // the caller already has the words, not guessing at them is the single
+  // biggest accuracy win available. They are treated exactly like a
+  // transcript from here on: analyzed, then dropped, never stored.
+  const referenceLyrics =
+    typeof req.body.reference_lyrics === 'string'
+      ? req.body.reference_lyrics.trim().slice(0, MAX_REFERENCE_LYRIC_CHARS)
+      : '';
+
+  // One or the other is required, not both: with lyrics in hand there is
+  // nothing left for a clip to contribute.
+  if (!req.file && !referenceLyrics) {
     return res.status(400).json({ error: 'No reel file provided.' });
   }
 
@@ -581,26 +612,60 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
     return res.status(400).json({ error: 'A topic for the new lyrics is required.' });
   }
 
+  const source = referenceLyrics ? 'pasted' : 'transcribed';
   const startedAt = Date.now();
   req.log.info(
-    { bytes: req.file.size, mimetype: req.file.mimetype, topic_length: topic.length },
+    {
+      bytes: req.file?.size ?? 0,
+      mimetype: req.file?.mimetype ?? null,
+      topic_length: topic.length,
+      source,
+    },
     'reel analysis requested'
   );
 
-  const transcript = await attempt('Failed to transcribe the clip', async () => {
-    const upload = await toFile(req.file.buffer, req.file.originalname || 'reel.mp4', {
-      type: req.file.mimetype,
+  let transcript = referenceLyrics;
+
+  if (!referenceLyrics) {
+    transcript = await attempt('Failed to transcribe the clip', async () => {
+      const upload = await toFile(req.file.buffer, req.file.originalname || 'reel.mp4', {
+        type: req.file.mimetype,
+      });
+      const result = await openai.audio.transcriptions.create(
+        buildTranscriptionParams({
+          file: upload,
+          model: TRANSCRIBE_MODEL,
+          language: req.body.language,
+          keywords: parseKeywords(req.body.keywords),
+          chunkingDisabled: process.env.TRANSCRIBE_CHUNKING === 'off',
+        })
+      );
+      return (result.text || '').trim();
     });
-    const result = await openai.audio.transcriptions.create({
-      file: upload,
-      model: TRANSCRIBE_MODEL,
-    });
-    return (result.text || '').trim();
-  });
+  }
 
   const transcribedMs = Date.now() - startedAt;
-  // Length only — the transcript itself stays out of the logs.
-  req.log.info({ transcribe_ms: transcribedMs, transcript_chars: transcript.length }, 'clip transcribed');
+
+  // How much vocal was actually captured, judged against the clip's real
+  // length rather than the words themselves — which stay out of the logs and
+  // out of the response, as they always have.
+  const quality =
+    source === 'pasted'
+      ? { verdict: 'exact', note: '' } // the caller's own words; nothing was guessed
+      : assessTranscriptQuality({
+          transcriptChars: transcript.length,
+          durationSeconds: clipSeconds(req.body.duration_seconds),
+        });
+
+  req.log.info(
+    {
+      transcribe_ms: transcribedMs,
+      transcript_chars: transcript.length,
+      source,
+      quality: quality.verdict,
+    },
+    source === 'pasted' ? 'reference lyrics supplied' : 'clip transcribed'
+  );
 
   const analysis = await attempt('Failed to analyze the clip', async () => {
     const completion = await openai.chat.completions.create({
@@ -626,7 +691,12 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
   // Best-effort, on the same reasoning as retrieval: a failed vault write must
   // not cost the caller an analysis they already paid a transcription and a
   // completion for. `remembered: false` in the response says it didn't stick.
-  const remember = req.body.remember !== 'false' && req.body.remember !== false;
+  const askedToRemember = req.body.remember !== 'false' && req.body.remember !== false;
+  // A profile derived from a transcript that caught almost nothing is worse
+  // than no profile: it is wrong, it is invisible once stored, and every
+  // later generation retrieves it. Analyses the caller can see are fine to
+  // discard; a poisoned vault is not.
+  const remember = askedToRemember && quality.verdict !== 'empty' && quality.verdict !== 'low';
   let profileId = null;
 
   if (remember) {
@@ -641,7 +711,7 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
         style_dna: analysis.style_dna,
         topic,
         lyrics: analysis.generated_lyrics,
-        sourceName: req.file.originalname,
+        sourceName: req.file?.originalname || 'pasted lyrics',
       });
 
       await withRetry(() => vaultRepo.insertChunks([profileDoc]), {
@@ -664,8 +734,18 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
     style_dna: analysis.style_dna,
     generated_lyrics: analysis.generated_lyrics,
     transcript_chars: transcript.length,
+    source,
+    // Enough to tell a good read from a bad one without ever returning the
+    // words: how much was captured, and this service's own verdict on it.
+    transcript_quality: quality.verdict,
+    quality_note: quality.note,
     remembered: Boolean(profileId),
     profile_id: profileId,
+    // Says the difference between "you turned it off" and "it wasn't worth keeping".
+    not_remembered_reason:
+      !askedToRemember || profileId ? null : quality.verdict === 'empty' || quality.verdict === 'low'
+        ? 'low_transcript_quality'
+        : 'vault_write_failed',
   });
 }));
 

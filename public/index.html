@@ -180,6 +180,24 @@
   #reel-lyrics.large-font { font-size: 15px; }
   #reel-lyrics.spacious-lines { line-height: 2; }
 
+  .accuracy-fields { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin-top: 12px; }
+  @media (max-width: 520px) { .accuracy-fields { grid-template-columns: 1fr; } }
+  .accuracy-fields .field { margin-bottom: 0; }
+  select {
+    font: inherit; color: var(--text); width: 100%;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 11px;
+  }
+  details.paste-lyrics { margin-top: 12px; }
+  details.paste-lyrics > summary {
+    cursor: pointer; font-size: 0.82rem; color: var(--accent);
+    padding: 4px 0; list-style-position: inside;
+  }
+  details.paste-lyrics > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  details.paste-lyrics p { margin: 6px 0 8px; font-size: 0.8rem; color: var(--muted); }
+  details.paste-lyrics textarea { min-height: 110px; }
+  .status.warn { color: #e0b062; }
+
   .remember-toggle {
     display: flex;
     align-items: flex-start;
@@ -388,7 +406,45 @@
             <input id="reel-topic" placeholder="e.g. late nights in the studio, moving on" autocomplete="off">
           </div>
 
-          <div class="remember-toggle">
+          <div class="accuracy-fields">
+          <div class="field">
+            <label for="reel-language">Language of the clip</label>
+            <select id="reel-language">
+              <option value="">Detect automatically</option>
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="pt">Portuguese</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="ko">Korean</option>
+              <option value="ja">Japanese</option>
+              <option value="zh">Chinese</option>
+              <option value="hi">Hindi</option>
+              <option value="ar">Arabic</option>
+              <option value="tl">Filipino</option>
+              <option value="yo">Yoruba</option>
+              <option value="sw">Swahili</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="reel-keywords">Names &amp; slang to expect</label>
+            <input id="reel-keywords" placeholder="e.g. Zay, no cap, skrrt" autocomplete="off">
+          </div>
+        </div>
+
+        <details class="paste-lyrics">
+          <summary>The words are wrong? Paste them instead</summary>
+          <p>
+            Transcribing sung or rapped vocals over a beat is the least reliable step here.
+            If you already have the words, paste them and transcription is skipped entirely —
+            the style is read from exactly what you type. They are analyzed and then dropped,
+            never stored.
+          </p>
+          <textarea id="reel-reference-lyrics" placeholder="Paste the reference lyrics…"></textarea>
+        </details>
+
+        <div class="remember-toggle">
             <input type="checkbox" id="remember-reel" checked>
             <label for="remember-reel">
               Keep this reel's style in the vault, so every later generation is shaped by it.

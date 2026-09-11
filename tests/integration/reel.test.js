@@ -41,13 +41,20 @@ const ANALYSIS = {
 beforeEach(() => {
   mockEmbed.mockReset().mockResolvedValue({ data: [{ embedding: [0.1] }] });
   mockInsertChunks.mockReset().mockResolvedValue({});
-  mockTranscribe.mockReset().mockResolvedValue({ text: 'some transcribed speech' });
+  // Long enough to be analyzable: below the floor, the route declines to
+  // remember the profile, which most of these cases are not about.
+  mockTranscribe.mockReset().mockResolvedValue({ text: TRANSCRIPT });
   mockChatCreate.mockReset().mockResolvedValue({
     choices: [{ message: { content: JSON.stringify(ANALYSIS) } }],
   });
 });
 
 const audio = () => Buffer.from('fake audio bytes');
+
+// A plausible read: enough text for a cadence to be legible in it.
+const TRANSCRIPT =
+  'some transcribed speech that runs long enough to read a cadence from, ' +
+  'with several lines and a repeated hook carrying through the middle of it';
 
 describe('POST /api/analyze-reel', () => {
   it('transcribes the clip and returns style DNA plus original lyrics', async () => {
@@ -81,7 +88,10 @@ describe('POST /api/analyze-reel', () => {
   });
 
   it('never writes the source transcript to the vault either', async () => {
-    mockTranscribe.mockResolvedValue({ text: 'the actual copyrighted words of the song' });
+    mockTranscribe.mockResolvedValue({
+      text: 'the actual copyrighted words of the song, repeated at length so the ' +
+        'route judges the read good enough to remember and actually writes a profile',
+    });
 
     await request(app)
       .post('/api/analyze-reel')
@@ -329,5 +339,215 @@ describe('POST /api/analyze-reel — remembering the reel', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.style_dna.feel).toBe(ANALYSIS.feel);
     expect(res.body.remembered).toBe(false);
+  });
+});
+
+describe('POST /api/analyze-reel — transcription accuracy', () => {
+  it('sends the accuracy levers, not just the file and the model', async () => {
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    const [params] = mockTranscribe.mock.calls[0];
+    expect(params.model).toBe('gpt-transcribe');
+    expect(params.temperature).toBe(0);
+    expect(params.prompt).toMatch(/lyrics/i);
+    expect(params.chunking_strategy).toBe('auto');
+  });
+
+  it('passes a caller-supplied language and keyword hints', async () => {
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('language', 'es')
+      .field('keywords', 'Zay, no cap\nskrrt')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    const [params] = mockTranscribe.mock.calls[0];
+    expect(params.language).toBe('es');
+    expect(params.keywords).toEqual(['Zay', 'no cap', 'skrrt']);
+  });
+
+  it('drops a bogus language rather than sending one the API would reject', async () => {
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('language', 'not-a-language')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    const [params] = mockTranscribe.mock.calls[0];
+    expect(params.language).toBeUndefined();
+  });
+
+  it('reports how good the read was without returning the words', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'x'.repeat(600) });
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('duration_seconds', '30')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.body.source).toBe('transcribed');
+    expect(res.body.transcript_quality).toBe('ok');
+    expect(res.body.quality_note).toBe('');
+    expect(res.body.transcript).toBeUndefined();
+  });
+
+  it('warns when almost nothing was transcribed for the length of the clip', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'yeah, uh' });
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('duration_seconds', '45')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.transcript_quality).toBe('low');
+    expect(res.body.quality_note).toMatch(/too little to read a cadence/i);
+  });
+
+  it('flags a thin read even when the browser sent no duration', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'yeah, uh' });
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    // A codec the browser can't decode must not switch the gate off.
+    expect(res.body.transcript_quality).toBe('low');
+    expect(res.body.remembered).toBe(false);
+  });
+
+  it('refuses to poison the vault with a profile built on a bad read', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'yeah, uh' });
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('duration_seconds', '45')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    // The caller still gets the analysis — they can see it and judge it. What
+    // they don't get is it silently steering every future generation.
+    expect(res.body.generated_lyrics).toBe(ANALYSIS.generated_lyrics);
+    expect(res.body.remembered).toBe(false);
+    expect(res.body.not_remembered_reason).toBe('low_transcript_quality');
+    expect(mockInsertChunks).not.toHaveBeenCalled();
+  });
+
+  it('ignores an implausible duration instead of trusting the browser', async () => {
+    mockTranscribe.mockResolvedValue({ text: TRANSCRIPT }); // analyzable; only the duration is bogus
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('duration_seconds', '999999999')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.body.transcript_quality).toBe('unknown');
+    expect(res.body.remembered).toBe(true);
+  });
+
+  it('still remembers a good read', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'x'.repeat(600) });
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('duration_seconds', '30')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.body.remembered).toBe(true);
+    expect(res.body.not_remembered_reason).toBeNull();
+  });
+
+  it('distinguishes a vault failure from a bad read', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'x'.repeat(600) }); // a good read
+    mockInsertChunks.mockRejectedValue(new Error('astra is down'));
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('duration_seconds', '30')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.body.not_remembered_reason).toBe('vault_write_failed');
+  }, 15000);
+});
+
+describe('POST /api/analyze-reel — pasted reference lyrics', () => {
+  const LYRICS = '[Verse 1]\nThe words the caller already had\nNo guessing required';
+
+  it('skips transcription entirely', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('reference_lyrics', LYRICS);
+
+    expect(res.statusCode).toBe(200);
+    expect(mockTranscribe).not.toHaveBeenCalled();
+    expect(res.body.source).toBe('pasted');
+    expect(res.body.transcript_quality).toBe('exact');
+  });
+
+  it('needs no clip at all', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('reference_lyrics', LYRICS);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.generated_lyrics).toBe(ANALYSIS.generated_lyrics);
+  });
+
+  it('analyzes the pasted words as it would a transcript', async () => {
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('reference_lyrics', LYRICS);
+
+    const [{ messages }] = mockChatCreate.mock.calls[0];
+    expect(messages[1].content).toContain('The words the caller already had');
+  });
+
+  it('never stores or returns the pasted words either', async () => {
+    await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('reference_lyrics', '[Verse 1]\nthe actual copyrighted words of the song');
+
+    const [documents] = mockInsertChunks.mock.calls[0];
+    expect(JSON.stringify(documents)).not.toContain('copyrighted words');
+  });
+
+  it('is remembered, since nothing about it was guessed', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('reference_lyrics', LYRICS);
+
+    expect(res.body.remembered).toBe(true);
+    const [documents] = mockInsertChunks.mock.calls[0];
+    expect(documents[0].metadata.source_name).toBe('pasted lyrics');
+  });
+
+  it('still requires a clip when no lyrics were pasted', async () => {
+    const res = await request(app).post('/api/analyze-reel').field('topic', 'moving on');
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/no reel file/i);
+  });
+
+  it('still requires a topic', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('reference_lyrics', LYRICS);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/topic/i);
   });
 });

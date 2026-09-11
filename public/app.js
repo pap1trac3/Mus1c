@@ -301,7 +301,7 @@ function selectReel(file) {
   // instead of after a long upload that the API would reject anyway.
   if (file.size > MAX_REEL_BYTES) {
     selectedReel = null;
-    $('analyze-reel-btn').disabled = true;
+    syncAnalyzeButton();
     $('file-name-display').textContent = '';
     setStatus(status, file.name + ' is ' + describeSize(file.size) + ' — the 25MB limit is set by the transcription API. Trim the clip or export audio only.', 'err');
     return;
@@ -309,8 +309,35 @@ function selectReel(file) {
 
   selectedReel = file;
   $('file-name-display').textContent = file.name + ' (' + describeSize(file.size) + ')';
-  $('analyze-reel-btn').disabled = false;
+  syncAnalyzeButton();
   setStatus(status, '');
+  readDuration(file);
+}
+
+// The clip's length, read from the decoded media element. The server uses it
+// to judge how much of the vocal the transcription actually caught — 8
+// characters from 45 seconds of audio means it heard the beat, not the words.
+// Best-effort: a codec the browser can't decode just leaves it unknown.
+let selectedReelSeconds = null;
+
+function readDuration(file) {
+  selectedReelSeconds = null;
+
+  const url = URL.createObjectURL(file);
+  const probe = document.createElement('video'); // also decodes bare audio
+  probe.preload = 'metadata';
+
+  const done = () => URL.revokeObjectURL(url);
+
+  probe.addEventListener('loadedmetadata', () => {
+    if (Number.isFinite(probe.duration) && probe.duration > 0) {
+      selectedReelSeconds = probe.duration;
+    }
+    done();
+  }, { once: true });
+  probe.addEventListener('error', done, { once: true });
+
+  probe.src = url;
 }
 
 const dropZone = $('drop-zone');
@@ -339,12 +366,25 @@ reelInput.addEventListener('change', (event) => {
   if (event.target.files.length) selectReel(event.target.files[0]);
 });
 
+// Either input is enough on its own: pasted lyrics stand in for the clip.
+function syncAnalyzeButton() {
+  const hasLyrics = $('reel-reference-lyrics').value.trim().length > 0;
+  $('analyze-reel-btn').disabled = !selectedReel && !hasLyrics;
+  // The transcription hints do nothing once the words are supplied directly.
+  $('reel-language').disabled = hasLyrics;
+  $('reel-keywords').disabled = hasLyrics;
+}
+
+$('reel-reference-lyrics').addEventListener('input', syncAnalyzeButton);
+
 $('analyze-reel-btn').addEventListener('click', async () => {
   const status = $('reel-status');
   const button = $('analyze-reel-btn');
   const topic = $('reel-topic').value.trim();
+  const referenceLyrics = $('reel-reference-lyrics').value.trim();
 
-  if (!selectedReel) return;
+  // Pasted lyrics stand in for the clip, so one or the other is enough.
+  if (!selectedReel && !referenceLyrics) return;
   if (!topic) {
     setStatus(status, 'Enter a topic for the new lyrics.', 'err');
     return;
@@ -353,16 +393,27 @@ $('analyze-reel-btn').addEventListener('click', async () => {
   const remember = $('remember-reel').checked;
 
   const form = new FormData();
-  form.append('reel', selectedReel);
+  if (selectedReel) form.append('reel', selectedReel);
   form.append('topic', topic);
   form.append('remember', String(remember));
+
+  if (referenceLyrics) {
+    form.append('reference_lyrics', referenceLyrics);
+  } else {
+    // Only meaningful for the transcription path.
+    form.append('language', $('reel-language').value);
+    form.append('keywords', $('reel-keywords').value);
+    if (selectedReelSeconds !== null) form.append('duration_seconds', String(selectedReelSeconds));
+  }
 
   button.disabled = true;
   $('reel-results').hidden = true;
   status.className = 'status busy';
   status.innerHTML = '';
   status.appendChild(Object.assign(document.createElement('span'), { className: 'spinner' }));
-  status.appendChild(document.createTextNode('Transcribing and deconstructing…'));
+  status.appendChild(
+    document.createTextNode(referenceLyrics ? 'Deconstructing…' : 'Transcribing and deconstructing…')
+  );
 
   try {
     // No Content-Type header: the browser must set the multipart boundary.
@@ -373,26 +424,38 @@ $('analyze-reel-btn').addEventListener('click', async () => {
     renderReelResult(result.style_dna, result.generated_lyrics);
     rememberReelResult(result.style_dna, result.generated_lyrics);
 
-    const analyzed =
-      result.transcript_chars > 0
-        ? 'Done — analyzed ' + result.transcript_chars + ' characters of speech.'
-        : 'Done — no speech detected, lyrics written from the topic alone.';
+    let analyzed;
+    if (result.source === 'pasted') {
+      analyzed = 'Done — read from the ' + result.transcript_chars + ' characters you pasted.';
+    } else if (result.transcript_chars > 0) {
+      analyzed = 'Done — transcribed ' + result.transcript_chars + ' characters.';
+    } else {
+      analyzed = 'Done — no vocals detected, lyrics written from the topic alone.';
+    }
 
-    // The server keeps the analysis even when the vault write fails, so say
-    // which of the two actually happened rather than assuming both did.
+    // The server keeps the analysis even when it declines to remember it, so
+    // say which of the two happened rather than assuming both did.
     let kept = '';
     if (result.remembered) {
       kept = ' Style kept — later generations will draw on it.';
       loadStyleMemory();
+    } else if (remember && result.not_remembered_reason === 'low_transcript_quality') {
+      // The server's note explains why; don't say it twice.
+      kept = ' Not kept in the vault.';
     } else if (remember) {
       kept = " Couldn't save the style to the vault, so this one stays a one-off.";
     }
 
-    setStatus(status, analyzed + kept, result.remembered || !remember ? 'ok' : 'err');
+    const poor = result.transcript_quality === 'low' || result.transcript_quality === 'empty';
+    setStatus(
+      status,
+      analyzed + kept + (result.quality_note ? ' ' + result.quality_note : ''),
+      poor ? 'warn' : (result.remembered || !remember ? 'ok' : 'err')
+    );
   } catch (err) {
     setStatus(status, err.message, 'err', err.details);
   } finally {
-    button.disabled = false;
+    syncAnalyzeButton();
   }
 });
 
@@ -510,6 +573,7 @@ $('download-lyrics-btn').addEventListener('click', () => {
 
 applyLyricPrefs(readLyricPrefs());
 restoreReelResult();
+syncAnalyzeButton();
 
 // ---------------------------------------------------------------------------
 // Style memory — what the vault has learned from reels so far
