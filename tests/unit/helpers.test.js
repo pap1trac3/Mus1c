@@ -65,13 +65,39 @@ describe('Unit Tests - Helper Functions', () => {
       const sections = groupRetrievedChunks(rawResults);
 
       expect(sections).toEqual([
-        { document_id: 'src-1', text: 'From source' },
-        { document_id: 'doc-9', text: 'From doc id' },
+        { document_id: 'src-1', text: 'From source', kind: 'lyrics' },
+        { document_id: 'doc-9', text: 'From doc id', kind: 'lyrics' },
       ]);
     });
 
     it('returns an empty array for no input', () => {
       expect(groupRetrievedChunks([])).toEqual([]);
+    });
+
+    it('reads a learned style profile, which stores its text under `text`', () => {
+      const sections = groupRetrievedChunks([
+        {
+          metadata: { document_id: 'profile-1', kind: 'style_profile' },
+          text: 'Style profile learned from a reference reel.',
+        },
+      ]);
+
+      expect(sections).toEqual([
+        {
+          document_id: 'profile-1',
+          text: 'Style profile learned from a reference reel.',
+          kind: 'style_profile',
+        },
+      ]);
+    });
+
+    it('keeps profiles and ingested chunks as separate sections', () => {
+      const sections = groupRetrievedChunks([
+        { metadata: { document_id: 'profile-1', kind: 'style_profile' }, text: 'Profile text' },
+        { metadata: { document_id: 'docA', chunk_index: 0 }, transcript: 'Lyric text' },
+      ]);
+
+      expect(sections.map((s) => s.kind)).toEqual(['style_profile', 'lyrics']);
     });
   });
 });

@@ -6,16 +6,56 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const OpenAI = require('openai');
-const { DataAPIClient } = require('@datastax/astra-db-ts');
+const { DataAPIClient, TooManyDocumentsToCountError } = require('@datastax/astra-db-ts');
 const { VaultRepository } = require('./lib/vaultRepository');
 const { AppError, attempt, asyncHandler } = require('./lib/errors');
 const { ingestSchema, generateSchema, validateBody } = require('./lib/validation');
 const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
 const { logger, httpLogger } = require('./lib/logger');
 const { createReadinessChecker } = require('./lib/readiness');
+const { withRetry } = require('./lib/retry');
+const { createHeartbeat } = require('./lib/sse');
+const { sanitizeMelody, clampTempo, MAX_EVENTS } = require('./lib/melody');
+const { normalizeLyricSheet } = require('./lib/lyricFormat');
+const {
+  reelUpload,
+  analysisSystemPrompt,
+  parseAnalysis,
+  MAX_UPLOAD_BYTES,
+  TRANSCRIBE_MODEL,
+} = require('./lib/reel');
+const {
+  buildTranscriptionParams,
+  assessTranscriptQuality,
+  parseKeywords,
+} = require('./lib/transcription');
+const {
+  STYLE_PROFILE_KIND,
+  LYRIC_KIND,
+  COUNT_UPPER_BOUND,
+  MAX_PROFILE_PAGE,
+  buildProfileText,
+  buildProfileDocument,
+  toProfileSummary,
+} = require('./lib/styleMemory');
+const { toFile } = require('openai');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
+
+// Enough for a long verse-chorus-verse sheet; bounds what one analysis costs.
+const MAX_REFERENCE_LYRIC_CHARS = 8000;
+// Upper bound on a clip the 25MB cap could hold, so a bogus duration can't
+// make an empty transcript look like a good yield.
+const MAX_CLIP_SECONDS = 3600;
+
+/** The browser's reading of the clip's length — a hint, so validate it hard. */
+function clipSeconds(raw) {
+  const seconds = Number(raw);
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_CLIP_SECONDS) return null;
+  return seconds;
+}
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -113,7 +153,10 @@ function groupRetrievedChunks(documents) {
 
     return {
       document_id: groupKey,
-      text: docs.map((d) => d.transcript).join(' '),
+      // Ingested chunks keep their text in `transcript`; learned reel style
+      // profiles keep theirs in `text`. Both are the document's text.
+      text: docs.map((d) => d.transcript ?? d.text ?? '').join(' '),
+      kind: docs[0].metadata?.kind || LYRIC_KIND,
     };
   });
 }
@@ -137,14 +180,21 @@ function buildMozartMessages(params) {
 
   const systemPrompt = `You are Mozart AI, an expert AI music producer and vocal arranger. You generate prompts for AI music generation platforms (such as Suno or Udio) from a set of musical parameters and reference lyric context.
 
-You must return ONLY a JSON object with exactly two keys:
+You must return ONLY a JSON object with exactly four keys:
 - "style_prompt": a concise, comma-separated string of production/style tags (genre, tempo, instrumentation, vocal timbre, acoustics, mood) suitable for pasting directly into an AI music generator's style field.
-- "structured_lyrics": a full lyric sheet formatted for AI vocal synthesis, using:
-  - Bracketed section headers, e.g. [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], [Outro]
+- "structured_lyrics": a full lyric sheet formatted for AI vocal synthesis, as a single string carrying its own line breaks:
+  - ONE LYRIC LINE PER LINE, each ending with a newline. Never run several lines together into one long line — a verse packed onto one line is unusable as a lyric sheet.
+  - Bracketed section headers on their own line, e.g. [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], [Outro], with a blank line between sections
   - Bracketed performance/production tags inline where useful, e.g. [soft female vocal], [building energy], [whispered], [ad-lib]
   - Hyphenated melisma for held/stretched syllables, e.g. "be-au-ti-ful", "for-ev-er"
   - Micro-pauses represented with ellipses "..." to indicate short breath or rhythmic pauses
   - Natural, singable phrasing consistent with the requested genre and theme
+- "tempo_bpm": the tempo of the piece as a number between 30 and 300.
+- "melody": a short playable motif from the piece, as an array of at most ${MAX_EVENTS} note events. Each event is an object:
+  - "note": scientific pitch notation (e.g. "D4", "F#3", "Bb5"), or an array of such strings for a chord
+  - "duration": one of "1n", "2n", "4n", "8n", "16n", "32n", optionally dotted ("4n.") or triplet ("8t")
+  - "time": transport position as "bar:beat:sixteenth" (e.g. "0:0:0", "1:2:2")
+  Keep it to 2-8 bars in the stated key, musically consistent with the style and lyrics.
 
 Do not include any commentary, markdown formatting, or text outside the JSON object.`;
 
@@ -157,7 +207,9 @@ Vocal Timbre: ${vocal_timbre || 'unspecified'}
 Acoustics: ${acoustics || 'unspecified'}
 Theme: ${theme || 'unspecified'}
 
-Reference context retrieved from the lyric vault (use for inspiration, phrasing, and thematic continuity — do not copy verbatim):
+Reference context retrieved from the lyric vault (use for inspiration, phrasing, and thematic continuity — do not copy verbatim). Two kinds of block may appear:
+- [Learned style profile: ...] — the stylistic fingerprint of a reference clip this user has already fed the tool. Treat these as the house style: match their feel, cadence and metaphor domains.
+- [Source: ...] — a lyric excerpt from the vault, for phrasing and theme only.
 ${context && context.trim().length > 0 ? context : 'No reference context available.'}
 
 Return the JSON object now.`;
@@ -179,7 +231,9 @@ function parseMozartOutput(raw) {
 
   return {
     style_prompt: parsed.style_prompt || '',
-    structured_lyrics: parsed.structured_lyrics || '',
+    structured_lyrics: normalizeLyricSheet(parsed.structured_lyrics || ''),
+    tempo_bpm: clampTempo(parsed.tempo_bpm),
+    melody: sanitizeMelody(parsed.melody),
   };
 }
 
@@ -245,7 +299,21 @@ async function generateMozartOutputStream(params, onToken, onStart) {
 const app = express();
 
 app.use(httpLogger);
-app.use(helmet());
+// Tone.js compiles its AudioWorklet from a blob: URL, which the default
+// script-src 'self' blocks outright. blob: is narrow — same-origin script can
+// only create blobs from content it already has — unlike allowlisting a
+// third-party CDN origin, which is why Tone is vendored rather than linked.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'script-src': ["'self'", 'blob:'],
+        'worker-src': ["'self'", 'blob:'],
+      },
+    },
+  })
+);
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json({ limit: '1mb' }));
 
@@ -329,23 +397,38 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
 
   req.log.info({ genre, theme, limit, streaming }, 'generation requested');
 
-  // Retrieval runs before any response is committed, so a failure here still
-  // returns the standard JSON error shape via the centralized handler.
-  const { retrieved, sections, context } = await attempt('Failed to generate Mozart AI output', async () => {
+  // Retrieval is best-effort: context improves the result but isn't required
+  // to produce one, so an upstream failure degrades to an unguided generation
+  // rather than failing the request. The embedding call is left to the OpenAI
+  // SDK's own retry; only the Astra call is wrapped, as it has none.
+  let retrieved = [];
+  let sections = [];
+  let context = '';
+  let degraded = false;
+
+  try {
     const queryText = [genre, theme, vocal_timbre, acoustics]
       .filter((part) => typeof part === 'string' && part.trim().length > 0)
       .join(', ');
 
     const queryEmbedding = await createEmbedding(queryText);
-    const retrieved = await vaultRepo.findSimilar(queryEmbedding, { limit });
+    retrieved = await withRetry(() => vaultRepo.findSimilar(queryEmbedding, { limit }), {
+      log: req.log,
+      label: 'vault retrieval',
+    });
 
-    const sections = groupRetrievedChunks(retrieved);
-    const context = sections
-      .map((section) => `[Source: ${section.document_id}]\n${section.text}`)
+    sections = groupRetrievedChunks(retrieved);
+    context = sections
+      .map((section) =>
+        section.kind === STYLE_PROFILE_KIND
+          ? `[Learned style profile: ${section.document_id}]\n${section.text}`
+          : `[Source: ${section.document_id}]\n${section.text}`
+      )
       .join('\n\n');
-
-    return { retrieved, sections, context };
-  });
+  } catch (err) {
+    degraded = true;
+    req.log.warn({ err: err.message }, 'retrieval failed; generating without vault context');
+  }
 
   const retrievalMs = Date.now() - startedAt;
   req.log.info(
@@ -368,6 +451,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
         generation_ms: Date.now() - generationStartedAt,
         total_ms: Date.now() - startedAt,
         usage: output.usage,
+        degraded,
       },
       'generation complete'
     );
@@ -375,8 +459,11 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     return res.json({
       style_prompt: output.style_prompt,
       structured_lyrics: output.structured_lyrics,
+      tempo_bpm: output.tempo_bpm,
+      melody: output.melody,
       retrieved_chunks: retrieved.length,
       retrieved_documents: sections.length,
+      degraded,
     });
   }
 
@@ -390,6 +477,13 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     'X-Accel-Buffering': 'no', // don't let nginx buffer the stream
   });
   res.flushHeaders();
+
+  // Keeps the connection alive through long gaps between tokens; cleared on
+  // completion, failure, or disconnect. Tunable because proxy idle timeouts
+  // vary widely (Cloudflare ~100s, some load balancers 30s).
+  const stopHeartbeat = createHeartbeat(res, {
+    intervalMs: Number(process.env.SSE_HEARTBEAT_MS) || undefined,
+  });
 
   let upstream = null;
   let clientGone = false;
@@ -425,6 +519,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     );
 
     if (clientGone) {
+      stopHeartbeat();
       req.log.warn(
         { ttft_ms: ttftMs, total_ms: Date.now() - startedAt },
         'client disconnected before completion'
@@ -441,23 +536,29 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
         total_ms: Date.now() - startedAt,
         stream_chunks: output.chunks,
         usage: output.usage,
+        degraded,
       },
       'generation complete'
     );
 
     // Final event mirrors the non-streaming response body, so clients never
     // have to reassemble and parse the token stream themselves.
+    stopHeartbeat();
     res.write(
       `event: complete\ndata: ${JSON.stringify({
         style_prompt: output.style_prompt,
         structured_lyrics: output.structured_lyrics,
+        tempo_bpm: output.tempo_bpm,
+        melody: output.melody,
         retrieved_chunks: retrieved.length,
         retrieved_documents: sections.length,
+        degraded,
       })}\n\n`
     );
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err) {
+    stopHeartbeat();
     if (clientGone) return;
     req.log.error({ err, ttft_ms: ttftMs, total_ms: Date.now() - startedAt }, 'generation stream failed');
     res.write(
@@ -468,6 +569,238 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     );
     res.end();
   }
+}));
+
+/**
+ * Transcribes an uploaded clip, derives abstract style features from it, and
+ * writes original lyrics on the caller's topic.
+ *
+ * The transcript is deliberately never persisted or returned: it is a verbatim
+ * copy of someone else's work, and only the derived style is needed downstream.
+ */
+app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
+  reelUpload(req, res, (err) => {
+    if (!err) return next();
+
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `Clip is too large. The transcription API accepts up to ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB — trim the clip or export audio only.`,
+      });
+    }
+    if (err.code === 'UNSUPPORTED_MEDIA') {
+      return res.status(415).json({ error: 'Unsupported file type. Use mp3, mp4, m4a, wav, or webm.' });
+    }
+    return res.status(400).json({ error: 'Upload failed', details: err.message });
+  });
+}, asyncHandler(async (req, res) => {
+  // Pasted reference lyrics skip transcription entirely. Speech-to-text on
+  // sung vocals over a beat is the least reliable link in this chain, so when
+  // the caller already has the words, not guessing at them is the single
+  // biggest accuracy win available. They are treated exactly like a
+  // transcript from here on: analyzed, then dropped, never stored.
+  const referenceLyrics =
+    typeof req.body.reference_lyrics === 'string'
+      ? req.body.reference_lyrics.trim().slice(0, MAX_REFERENCE_LYRIC_CHARS)
+      : '';
+
+  // One or the other is required, not both: with lyrics in hand there is
+  // nothing left for a clip to contribute.
+  if (!req.file && !referenceLyrics) {
+    return res.status(400).json({ error: 'No reel file provided.' });
+  }
+
+  const topic = typeof req.body.topic === 'string' ? req.body.topic.trim().slice(0, 300) : '';
+  if (!topic) {
+    return res.status(400).json({ error: 'A topic for the new lyrics is required.' });
+  }
+
+  const source = referenceLyrics ? 'pasted' : 'transcribed';
+  const startedAt = Date.now();
+  req.log.info(
+    {
+      bytes: req.file?.size ?? 0,
+      mimetype: req.file?.mimetype ?? null,
+      topic_length: topic.length,
+      source,
+    },
+    'reel analysis requested'
+  );
+
+  let transcript = referenceLyrics;
+
+  if (!referenceLyrics) {
+    transcript = await attempt('Failed to transcribe the clip', async () => {
+      const upload = await toFile(req.file.buffer, req.file.originalname || 'reel.mp4', {
+        type: req.file.mimetype,
+      });
+      const result = await openai.audio.transcriptions.create(
+        buildTranscriptionParams({
+          file: upload,
+          model: TRANSCRIBE_MODEL,
+          language: req.body.language,
+          keywords: parseKeywords(req.body.keywords),
+          chunkingDisabled: process.env.TRANSCRIBE_CHUNKING === 'off',
+        })
+      );
+      return (result.text || '').trim();
+    });
+  }
+
+  const transcribedMs = Date.now() - startedAt;
+
+  // How much vocal was actually captured, judged against the clip's real
+  // length rather than the words themselves — which stay out of the logs and
+  // out of the response, as they always have.
+  const quality =
+    source === 'pasted'
+      ? { verdict: 'exact', note: '' } // the caller's own words; nothing was guessed
+      : assessTranscriptQuality({
+          transcriptChars: transcript.length,
+          durationSeconds: clipSeconds(req.body.duration_seconds),
+        });
+
+  req.log.info(
+    {
+      transcribe_ms: transcribedMs,
+      transcript_chars: transcript.length,
+      source,
+      quality: quality.verdict,
+    },
+    source === 'pasted' ? 'reference lyrics supplied' : 'clip transcribed'
+  );
+
+  const analysis = await attempt('Failed to analyze the clip', async () => {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: analysisSystemPrompt },
+        {
+          role: 'user',
+          content: `Topic for the new lyrics: ${topic}\n\nTranscript of the clip:\n${transcript || '(no speech detected)'}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.85,
+    });
+    return parseAnalysis(completion.choices[0]?.message?.content);
+  });
+
+  // What makes a reel more than a one-shot: the derived style and the lyrics
+  // written from it go into the same vault /api/generate retrieves from, so
+  // every later generation is steered by every reel fed in before it. The
+  // transcript still goes nowhere — only this service's own output is kept.
+  //
+  // Best-effort, on the same reasoning as retrieval: a failed vault write must
+  // not cost the caller an analysis they already paid a transcription and a
+  // completion for. `remembered: false` in the response says it didn't stick.
+  const askedToRemember = req.body.remember !== 'false' && req.body.remember !== false;
+  // A profile derived from a transcript that caught almost nothing is worse
+  // than no profile: it is wrong, it is invisible once stored, and every
+  // later generation retrieves it. Analyses the caller can see are fine to
+  // discard; a poisoned vault is not.
+  const remember = askedToRemember && quality.verdict !== 'empty' && quality.verdict !== 'low';
+  let profileId = null;
+
+  if (remember) {
+    try {
+      const profileText = buildProfileText({
+        style_dna: analysis.style_dna,
+        topic,
+        lyrics: analysis.generated_lyrics,
+      });
+      const profileDoc = buildProfileDocument({
+        vector: await createEmbedding(profileText),
+        style_dna: analysis.style_dna,
+        topic,
+        lyrics: analysis.generated_lyrics,
+        sourceName: req.file?.originalname || 'pasted lyrics',
+      });
+
+      await withRetry(() => vaultRepo.insertChunks([profileDoc]), {
+        log: req.log,
+        label: 'style profile write',
+      });
+      profileId = profileDoc.metadata.document_id;
+      req.log.info({ profile_id: profileId }, 'style profile learned');
+    } catch (err) {
+      req.log.warn({ err: err.message }, 'failed to remember this reel; returning the analysis anyway');
+    }
+  }
+
+  req.log.info(
+    { transcribe_ms: transcribedMs, total_ms: Date.now() - startedAt, remembered: Boolean(profileId) },
+    'reel analysis complete'
+  );
+
+  res.json({
+    style_dna: analysis.style_dna,
+    generated_lyrics: analysis.generated_lyrics,
+    transcript_chars: transcript.length,
+    source,
+    // Enough to tell a good read from a bad one without ever returning the
+    // words: how much was captured, and this service's own verdict on it.
+    transcript_quality: quality.verdict,
+    quality_note: quality.note,
+    remembered: Boolean(profileId),
+    profile_id: profileId,
+    // Says the difference between "you turned it off" and "it wasn't worth keeping".
+    not_remembered_reason:
+      !askedToRemember || profileId ? null : quality.verdict === 'empty' || quality.verdict === 'low'
+        ? 'low_transcript_quality'
+        : 'vault_write_failed',
+  });
+}));
+
+// ---------------------------------------------------------------------------
+// Style memory: the profiles the vault has learned from reels so far.
+// ---------------------------------------------------------------------------
+
+app.get('/api/style-memory', asyncHandler(async (req, res) => {
+  const requested = Number.parseInt(req.query.limit, 10);
+  const limit =
+    Number.isInteger(requested) && requested > 0 ? Math.min(requested, MAX_PROFILE_PAGE) : 10;
+
+  const profiles = await attempt('Failed to read style memory', () =>
+    withRetry(() => vaultRepo.findProfiles({ limit }), { log: req.log, label: 'style memory listing' })
+  );
+
+  // The headline total is a nice-to-have, and the Data API refuses to count
+  // without a ceiling. Report "at least N" rather than make the page wait on
+  // a full scan — and rather than fail a listing that already succeeded.
+  let count = profiles.length;
+  let countCapped = false;
+  try {
+    count = await vaultRepo.countProfiles(COUNT_UPPER_BOUND);
+  } catch (err) {
+    const overCeiling =
+      err instanceof TooManyDocumentsToCountError || err?.name === 'TooManyDocumentsToCountError';
+    if (overCeiling) {
+      count = COUNT_UPPER_BOUND;
+      countCapped = true;
+    }
+    req.log.warn({ err: err.message, over_ceiling: overCeiling }, 'style profile count unavailable');
+  }
+
+  res.json({
+    count,
+    count_capped: countCapped,
+    profiles: profiles.map(toProfileSummary),
+  });
+}));
+
+app.delete('/api/style-memory/:id', strictLimiter, asyncHandler(async (req, res) => {
+  const id = String(req.params.id || '').slice(0, 200);
+
+  const result = await attempt('Failed to forget that style profile', () =>
+    vaultRepo.deleteProfile(id)
+  );
+
+  if (!result?.deletedCount) {
+    return res.status(404).json({ error: 'No learned style profile with that id.' });
+  }
+
+  req.log.info({ profile_id: id, deleted: result.deletedCount }, 'style profile forgotten');
+  res.json({ success: true, id, deleted: result.deletedCount });
 }));
 
 app.use((req, res) => {
