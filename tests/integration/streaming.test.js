@@ -116,6 +116,8 @@ describe('POST /api/generate - SSE streaming', () => {
       retrieved_chunks: 1,
       retrieved_documents: 1,
       degraded: false,
+      tempo_bpm: 120,
+      melody: [],
     });
   });
 
@@ -149,6 +151,8 @@ describe('POST /api/generate - SSE streaming', () => {
       retrieved_chunks: 1,
       retrieved_documents: 1,
       degraded: false,
+      tempo_bpm: 120,
+      melody: [],
     });
     expect(mockChatCreate.mock.calls[0][0].stream).toBeUndefined();
   });

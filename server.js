@@ -15,6 +15,7 @@ const { logger, httpLogger } = require('./lib/logger');
 const { createReadinessChecker } = require('./lib/readiness');
 const { withRetry } = require('./lib/retry');
 const { createHeartbeat } = require('./lib/sse');
+const { sanitizeMelody, clampTempo, MAX_EVENTS } = require('./lib/melody');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -139,7 +140,7 @@ function buildMozartMessages(params) {
 
   const systemPrompt = `You are Mozart AI, an expert AI music producer and vocal arranger. You generate prompts for AI music generation platforms (such as Suno or Udio) from a set of musical parameters and reference lyric context.
 
-You must return ONLY a JSON object with exactly two keys:
+You must return ONLY a JSON object with exactly four keys:
 - "style_prompt": a concise, comma-separated string of production/style tags (genre, tempo, instrumentation, vocal timbre, acoustics, mood) suitable for pasting directly into an AI music generator's style field.
 - "structured_lyrics": a full lyric sheet formatted for AI vocal synthesis, using:
   - Bracketed section headers, e.g. [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], [Outro]
@@ -147,6 +148,12 @@ You must return ONLY a JSON object with exactly two keys:
   - Hyphenated melisma for held/stretched syllables, e.g. "be-au-ti-ful", "for-ev-er"
   - Micro-pauses represented with ellipses "..." to indicate short breath or rhythmic pauses
   - Natural, singable phrasing consistent with the requested genre and theme
+- "tempo_bpm": the tempo of the piece as a number between 30 and 300.
+- "melody": a short playable motif from the piece, as an array of at most ${MAX_EVENTS} note events. Each event is an object:
+  - "note": scientific pitch notation (e.g. "D4", "F#3", "Bb5"), or an array of such strings for a chord
+  - "duration": one of "1n", "2n", "4n", "8n", "16n", "32n", optionally dotted ("4n.") or triplet ("8t")
+  - "time": transport position as "bar:beat:sixteenth" (e.g. "0:0:0", "1:2:2")
+  Keep it to 2-8 bars in the stated key, musically consistent with the style and lyrics.
 
 Do not include any commentary, markdown formatting, or text outside the JSON object.`;
 
@@ -182,6 +189,8 @@ function parseMozartOutput(raw) {
   return {
     style_prompt: parsed.style_prompt || '',
     structured_lyrics: parsed.structured_lyrics || '',
+    tempo_bpm: clampTempo(parsed.tempo_bpm),
+    melody: sanitizeMelody(parsed.melody),
   };
 }
 
@@ -247,7 +256,21 @@ async function generateMozartOutputStream(params, onToken, onStart) {
 const app = express();
 
 app.use(httpLogger);
-app.use(helmet());
+// Tone.js compiles its AudioWorklet from a blob: URL, which the default
+// script-src 'self' blocks outright. blob: is narrow — same-origin script can
+// only create blobs from content it already has — unlike allowlisting a
+// third-party CDN origin, which is why Tone is vendored rather than linked.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'script-src': ["'self'", 'blob:'],
+        'worker-src': ["'self'", 'blob:'],
+      },
+    },
+  })
+);
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json({ limit: '1mb' }));
 
@@ -389,6 +412,8 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     return res.json({
       style_prompt: output.style_prompt,
       structured_lyrics: output.structured_lyrics,
+      tempo_bpm: output.tempo_bpm,
+      melody: output.melody,
       retrieved_chunks: retrieved.length,
       retrieved_documents: sections.length,
       degraded,
@@ -476,6 +501,8 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
       `event: complete\ndata: ${JSON.stringify({
         style_prompt: output.style_prompt,
         structured_lyrics: output.structured_lyrics,
+        tempo_bpm: output.tempo_bpm,
+        melody: output.melody,
         retrieved_chunks: retrieved.length,
         retrieved_documents: sections.length,
         degraded,

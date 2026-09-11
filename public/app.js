@@ -132,6 +132,7 @@ async function handleGenerate(event) {
       onComplete: (result) => {
         styleOut.textContent = result.style_prompt || '';
         lyricsOut.textContent = result.structured_lyrics || '';
+        loadMelody(result);
         meta.textContent =
           'Retrieved ' + result.retrieved_chunks + ' chunk(s) from ' +
           result.retrieved_documents + ' document(s).';
@@ -185,3 +186,98 @@ async function handleIngest(event) {
 
 $('generate-form').addEventListener('submit', handleGenerate);
 $('ingest-form').addEventListener('submit', handleIngest);
+
+// ---------------------------------------------------------------------------
+// Audio preview
+// ---------------------------------------------------------------------------
+
+let pendingMelody = null;
+let spectrumFrame = null;
+
+function setPlayerStatus(text, kind) {
+  const el = $('audio-status');
+  el.textContent = text;
+  el.className = 'status' + (kind ? ' ' + kind : '');
+}
+
+/** Called when a generation completes; stores the motif for playback. */
+function loadMelody(result) {
+  pendingMelody = Array.isArray(result.melody) && result.melody.length
+    ? { melody: result.melody, tempo: result.tempo_bpm }
+    : null;
+
+  const playBtn = $('play-btn');
+  if (!pendingMelody) {
+    playBtn.disabled = true;
+    setPlayerStatus('No playable motif in this result.', 'err');
+    return;
+  }
+
+  playBtn.disabled = false;
+  setPlayerStatus(
+    'Ready — ' + pendingMelody.melody.length + ' events at ' + pendingMelody.tempo + ' BPM.',
+    'ok'
+  );
+
+  // If the engine is already running, swap the material in immediately.
+  if (window.audioEngine.initialized) {
+    window.audioEngine.load(pendingMelody.melody, pendingMelody.tempo);
+  }
+}
+
+function drawSpectrum() {
+  const canvas = $('visualizer-canvas');
+  const ctx = canvas.getContext('2d');
+  const values = window.audioEngine.getSpectrum();
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const barWidth = canvas.width / values.length;
+  for (let i = 0; i < values.length; i++) {
+    // FFT returns dB, roughly -100 (silence) to 0 (full scale).
+    const magnitude = Math.max(0, Math.min(1, (values[i] + 100) / 100));
+    const barHeight = magnitude * canvas.height;
+    ctx.fillStyle = 'rgba(200, 164, 94, ' + (0.35 + magnitude * 0.65) + ')';
+    ctx.fillRect(i * barWidth, canvas.height - barHeight, Math.max(1, barWidth - 1), barHeight);
+  }
+
+  // Driven by engine state, so the loop ends with playback rather than spinning.
+  if (window.audioEngine.state === 'playing') {
+    spectrumFrame = requestAnimationFrame(drawSpectrum);
+  } else {
+    spectrumFrame = null;
+  }
+}
+
+window.audioEngine.onState = (state) => {
+  const labels = { offline: 'Offline', stopped: 'Stopped', playing: 'Playing', paused: 'Paused' };
+  const kinds = { playing: 'ok', paused: 'busy', stopped: '', offline: '' };
+  setPlayerStatus(labels[state] || state, kinds[state]);
+
+  $('pause-btn').disabled = state !== 'playing';
+  $('stop-btn').disabled = state === 'stopped' || state === 'offline';
+
+  if (state === 'playing' && spectrumFrame === null) drawSpectrum();
+};
+
+$('play-btn').addEventListener('click', async () => {
+  if (!pendingMelody) return;
+  try {
+    setPlayerStatus('Starting audio…', 'busy');
+    // Must happen inside the click handler: AudioContext needs a user gesture.
+    await window.audioEngine.init();
+    window.audioEngine.load(pendingMelody.melody, pendingMelody.tempo);
+    window.audioEngine.play();
+  } catch (err) {
+    setPlayerStatus('Audio failed to start: ' + err.message, 'err');
+  }
+});
+
+$('pause-btn').addEventListener('click', () => window.audioEngine.pause());
+$('stop-btn').addEventListener('click', () => window.audioEngine.stop());
+
+$('volume-slider').addEventListener('input', (event) => {
+  const db = parseFloat(event.target.value);
+  $('volume-value').textContent = db + ' dB';
+  window.audioEngine.setVolume(db);
+});
