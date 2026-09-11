@@ -52,6 +52,18 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
+# Base-image hardening, both driven by findings from the Trivy gate:
+#  - apk upgrade picks up the patched openssl (CVE-2026-14456).
+#  - The bundled npm CLI vendors its own dependency tree (tar, pacote,
+#    sigstore, brace-expansion, picomatch, ip-address) and was the source of
+#    every Node-level CVE in this image — none of them are app dependencies.
+#    The container starts node directly, so npm is unused here. It stays in
+#    the builder and test stages, which do need it.
+RUN apk upgrade --no-cache libcrypto3 libssl3 \
+    && rm -rf /usr/local/lib/node_modules/npm \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx
+
 # Copy pruned production dependencies and app source from builder stage
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package*.json ./
