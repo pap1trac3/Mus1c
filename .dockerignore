@@ -6,7 +6,6 @@ npm-debug.log
 .github
 .gitignore
 coverage
-tests
 README.md
 Dockerfile
 docker-compose.yml

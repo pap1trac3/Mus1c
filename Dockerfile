@@ -17,8 +17,33 @@ COPY lib ./lib
 COPY public ./public
 
 # ==========================================
-# STAGE 2: Production Runtime
+# STAGE 2: Test (build-time gate)
 # ==========================================
+# Needs devDependencies, so a full `npm ci` rather than the builder's
+# --omit=dev. RUN, not CMD: the suite has to execute during
+# `docker build --target test` so a failure fails the build. A CMD would
+# only run on container start, letting the build pass with a red suite.
+FROM node:20-alpine AS test
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY server.js ./
+COPY lib ./lib
+COPY public ./public
+COPY tests ./tests
+
+ENV NODE_ENV=test
+RUN npm test
+
+# ==========================================
+# STAGE 3: Production Runtime
+# ==========================================
+# Not derived from `test`, so the default `docker build .` (and compose)
+# still produce the runtime image without running the suite; CI gates
+# explicitly via --target test.
 FROM node:20-alpine AS runner
 
 WORKDIR /app
