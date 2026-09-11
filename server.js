@@ -11,6 +11,8 @@ const { VaultRepository } = require('./lib/vaultRepository');
 const { AppError, attempt, asyncHandler } = require('./lib/errors');
 const { ingestSchema, generateSchema, validateBody } = require('./lib/validation');
 const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
+const { logger, httpLogger } = require('./lib/logger');
+const { createReadinessChecker } = require('./lib/readiness');
 
 const COLLECTION_NAME = 'lyric_vault';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
@@ -44,6 +46,7 @@ const db = dataApiClient.db(
 );
 const lyricVault = db.collection(COLLECTION_NAME);
 const vaultRepo = new VaultRepository(lyricVault);
+const checkReadiness = createReadinessChecker({ vaultRepo, openai });
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -192,7 +195,10 @@ async function generateMozartOutput(params) {
     temperature: 0.85,
   });
 
-  return parseMozartOutput(completion.choices[0]?.message?.content);
+  return {
+    ...parseMozartOutput(completion.choices[0]?.message?.content),
+    usage: completion.usage || null,
+  };
 }
 
 /**
@@ -208,20 +214,28 @@ async function generateMozartOutputStream(params, onToken, onStart) {
     response_format: { type: 'json_object' },
     temperature: 0.85,
     stream: true,
+    // Emits a final usage-bearing chunk, so streamed requests report real
+    // token counts instead of a count of SSE deltas.
+    stream_options: { include_usage: true },
   });
 
   if (onStart) onStart(stream);
 
   let raw = '';
+  let chunks = 0;
+  let usage = null;
+
   for await (const chunk of stream) {
-    const token = chunk.choices[0]?.delta?.content || '';
+    if (chunk.usage) usage = chunk.usage; // final chunk carries usage, no choices
+    const token = chunk.choices?.[0]?.delta?.content || '';
     if (token) {
       raw += token;
+      chunks += 1;
       onToken(token);
     }
   }
 
-  return parseMozartOutput(raw);
+  return { ...parseMozartOutput(raw), usage, chunks };
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +244,7 @@ async function generateMozartOutputStream(params, onToken, onStart) {
 
 const app = express();
 
+app.use(httpLogger);
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json({ limit: '1mb' }));
@@ -245,13 +260,28 @@ app.use('/api', apiLimiter);
 // Routes
 // ---------------------------------------------------------------------------
 
+// Liveness: is this process up? Deliberately does not touch upstreams —
+// container healthchecks poll it on a short interval, and a transient Astra
+// or OpenAI blip should not get a healthy process killed and restarted.
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'mozart-ai-music-generator',
     timestamp: new Date().toISOString(),
+    uptime_s: Math.round(process.uptime()),
   });
 });
+
+// Readiness: can this process actually serve traffic? Probes upstreams for
+// real and returns 503 when one is down, so a load balancer can drain it.
+app.get('/ready', asyncHandler(async (req, res) => {
+  const result = await checkReadiness({ force: req.query.force === 'true' });
+  res.status(result.ready ? 200 : 503).json({
+    ...result,
+    service: 'mozart-ai-music-generator',
+    timestamp: new Date().toISOString(),
+  });
+}));
 
 app.post('/api/ingest', strictLimiter, validateBody(ingestSchema), asyncHandler(async (req, res) => {
   const { transcript, metadata = {} } = req.body;
@@ -294,6 +324,10 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
   const { genre, bpm, key, vocal_timbre, acoustics, theme, retrieval_limit } = req.body;
 
   const limit = Number.isInteger(retrieval_limit) && retrieval_limit > 0 ? retrieval_limit : 8;
+  const startedAt = Date.now();
+  const streaming = wantsEventStream(req);
+
+  req.log.info({ genre, theme, limit, streaming }, 'generation requested');
 
   // Retrieval runs before any response is committed, so a failure here still
   // returns the standard JSON error shape via the centralized handler.
@@ -313,11 +347,29 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     return { retrieved, sections, context };
   });
 
+  const retrievalMs = Date.now() - startedAt;
+  req.log.info(
+    { retrieval_ms: retrievalMs, retrieved_chunks: retrieved.length, retrieved_documents: sections.length },
+    'vault retrieval complete'
+  );
+
   const generationParams = { genre, bpm, key, vocal_timbre, acoustics, theme, context };
 
-  if (!wantsEventStream(req)) {
+  if (!streaming) {
+    const generationStartedAt = Date.now();
     const output = await attempt('Failed to generate Mozart AI output', () =>
       generateMozartOutput(generationParams)
+    );
+
+    req.log.info(
+      {
+        streaming: false,
+        retrieval_ms: retrievalMs,
+        generation_ms: Date.now() - generationStartedAt,
+        total_ms: Date.now() - startedAt,
+        usage: output.usage,
+      },
+      'generation complete'
     );
 
     return res.json({
@@ -351,10 +403,19 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     if (upstream) upstream.controller.abort();
   });
 
+  const generationStartedAt = Date.now();
+  let ttftMs = null;
+
   try {
     const output = await generateMozartOutputStream(
       generationParams,
       (token) => {
+        if (ttftMs === null) {
+          // Measured from request start, so it includes retrieval — that is
+          // what the user actually waits through before seeing anything.
+          ttftMs = Date.now() - startedAt;
+          req.log.info({ ttft_ms: ttftMs, retrieval_ms: retrievalMs }, 'first token streamed');
+        }
         if (!clientGone) res.write(`data: ${JSON.stringify({ token })}\n\n`);
       },
       (stream) => {
@@ -363,7 +424,26 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
       }
     );
 
-    if (clientGone) return;
+    if (clientGone) {
+      req.log.warn(
+        { ttft_ms: ttftMs, total_ms: Date.now() - startedAt },
+        'client disconnected before completion'
+      );
+      return;
+    }
+
+    req.log.info(
+      {
+        streaming: true,
+        retrieval_ms: retrievalMs,
+        ttft_ms: ttftMs,
+        generation_ms: Date.now() - generationStartedAt,
+        total_ms: Date.now() - startedAt,
+        stream_chunks: output.chunks,
+        usage: output.usage,
+      },
+      'generation complete'
+    );
 
     // Final event mirrors the non-streaming response body, so clients never
     // have to reassemble and parse the token stream themselves.
@@ -379,7 +459,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     res.end();
   } catch (err) {
     if (clientGone) return;
-    console.error('Failed to generate Mozart AI output (stream):', err);
+    req.log.error({ err, ttft_ms: ttftMs, total_ms: Date.now() - startedAt }, 'generation stream failed');
     res.write(
       `event: error\ndata: ${JSON.stringify({
         error: 'Failed to generate Mozart AI output',
@@ -402,10 +482,10 @@ app.use((req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (err instanceof AppError) {
-    console.error(`${err.publicMessage}:`, err.cause);
+    (req.log || logger).error({ err: err.cause }, err.publicMessage);
     return res.status(500).json({ error: err.publicMessage, details: err.cause?.message });
   }
-  console.error('Unhandled error:', err);
+  (req.log || logger).error({ err }, 'unhandled error');
   res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -417,7 +497,7 @@ const PORT = process.env.PORT || 3000;
 
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`Mozart AI Music Generator listening on port ${PORT}`);
+    logger.info({ port: PORT }, 'Mozart AI Music Generator listening');
   });
 }
 
