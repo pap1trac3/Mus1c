@@ -8,6 +8,7 @@ const mockTranscribe = jest.fn();
 const mockChatCreate = jest.fn();
 const mockEmbed = jest.fn();
 const mockInsertChunks = jest.fn();
+const mockToFile = jest.fn();
 
 jest.mock('../../lib/vaultRepository', () => ({
   VaultRepository: jest.fn().mockImplementation(() => ({
@@ -25,7 +26,7 @@ jest.mock('openai', () => {
     audio: { transcriptions: { create: mockTranscribe } },
   }));
   // server.js also imports the toFile helper off the module.
-  MockOpenAI.toFile = jest.fn(async (buffer, name, opts) => ({ buffer, name, opts }));
+  MockOpenAI.toFile = mockToFile;
   return MockOpenAI;
 });
 
@@ -39,6 +40,7 @@ const ANALYSIS = {
 };
 
 beforeEach(() => {
+  mockToFile.mockReset().mockImplementation(async (buffer, name, opts) => ({ buffer, name, opts }));
   mockEmbed.mockReset().mockResolvedValue({ data: [{ embedding: [0.1] }] });
   mockInsertChunks.mockReset().mockResolvedValue({});
   // Long enough to be analyzable: below the floor, the route declines to
@@ -594,5 +596,79 @@ describe('POST /api/analyze-reel — pasted reference lyrics', () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.body.error).toMatch(/topic/i);
+  });
+});
+
+describe('POST /api/analyze-reel — vocal isolation', () => {
+  afterEach(() => { delete process.env.SEPARATOR_URL; });
+
+  it('transcribes the original mix when no separator is configured', async () => {
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.vocals_isolated).toBe(false);
+    expect(res.body.separation_skipped).toBe('not_configured');
+    // Default deployment is unchanged: no separator, no behaviour change.
+    const [, name] = mockToFile.mock.calls[0];
+    expect(name).toBe('clip.mp3');
+  });
+
+  it('sends the isolated stem to transcription when separation succeeds', async () => {
+    process.env.SEPARATOR_URL = 'http://separator:8000';
+    const stem = Buffer.alloc(4096, 7);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => stem,
+      headers: { get: () => 'htdemucs' },
+    });
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.vocals_isolated).toBe(true);
+    expect(res.body.separation_skipped).toBeNull();
+
+    // The WAV stem, not the original container, is what gets transcribed.
+    const [buffer, name, opts] = mockToFile.mock.calls[0];
+    expect(name).toBe('vocals.wav');
+    expect(opts.type).toBe('audio/wav');
+    expect(buffer.length).toBe(stem.length);
+  });
+
+  it('still returns an analysis when the separator is down', async () => {
+    process.env.SEPARATOR_URL = 'http://separator:8000';
+    global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .attach('reel', audio(), { filename: 'clip.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.generated_lyrics).toBe(ANALYSIS.generated_lyrics);
+    expect(res.body.vocals_isolated).toBe(false);
+    expect(res.body.separation_skipped).toBe('unreachable');
+    // Fell back to the original mix rather than failing.
+    expect(mockToFile.mock.calls[0][1]).toBe('clip.mp3');
+  });
+
+  it('does not call the separator on the pasted-lyrics path', async () => {
+    process.env.SEPARATOR_URL = 'http://separator:8000';
+    global.fetch = jest.fn();
+
+    const res = await request(app)
+      .post('/api/analyze-reel')
+      .field('topic', 'moving on')
+      .field('reference_lyrics', '[Verse 1]\nWords I already had, enough of them to read a cadence from');
+
+    expect(res.statusCode).toBe(200);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(res.body.vocals_isolated).toBeNull();
   });
 });
