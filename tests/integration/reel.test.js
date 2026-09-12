@@ -71,6 +71,7 @@ describe('POST /api/analyze-reel', () => {
       feel: ANALYSIS.feel,
       cadence: ANALYSIS.cadence,
       metaphor_domains: ANALYSIS.metaphor_domains,
+      literary_devices: [],
     });
     expect(res.body.generated_lyrics).toBe(ANALYSIS.generated_lyrics);
   });
@@ -293,6 +294,7 @@ describe('POST /api/analyze-reel', () => {
       feel: 'Unknown',
       cadence: 'Unknown',
       metaphor_domains: [],
+      literary_devices: [],
     });
   });
 });

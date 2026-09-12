@@ -247,6 +247,19 @@
   .memory-item .memory-actions { display: flex; justify-content: flex-end; margin-top: auto; }
   .memory-empty { color: var(--muted); font-size: 0.85rem; margin: 0; }
 
+  .mode-switch { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .mode-switch button {
+    width: auto; margin-top: 0; padding: 6px 14px; font-size: 0.85rem;
+    background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border); font-weight: 500;
+  }
+  .mode-switch button[aria-selected="true"] {
+    background: var(--accent-soft); color: var(--accent);
+    border-color: rgba(200, 164, 94, 0.35); font-weight: 600;
+  }
+  #trainer-text { min-height: 170px; }
+  .blueprint .summary { font-size: 0.85rem; color: var(--muted); margin: 0; }
+
   .reel-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
   @media (max-width: 860px) { .reel-grid { grid-template-columns: minmax(0, 1fr); } }
   .drop-zone {
@@ -383,14 +396,72 @@
       </div>
     </section>
     <section class="full">
-      <h2>Reel lyric deconstructor</h2>
+      <h2>Train the style vault</h2>
       <p class="hint">
-        Upload a clip to extract its stylistic qualities — feel, cadence, imagery — and
-        write original lyrics on your own topic in that style. The clip's transcript is used
-        only for analysis and is never stored, returned, or logged — what gets kept is the
-        style it reveals, so later generations can draw on it.
+        Teach the vault a style from a clip or from writing you already have. Either way
+        the source is used only for analysis and is never stored, returned, or logged —
+        what gets kept is the style it reveals, so later generations can draw on it.
       </p>
 
+      <div class="mode-switch" role="tablist" aria-label="How to train the vault">
+        <button id="mode-reel" type="button" role="tab" aria-selected="true" aria-controls="panel-reel">
+          From a clip
+        </button>
+        <button id="mode-text" type="button" role="tab" aria-selected="false" aria-controls="panel-text">
+          From pasted text
+        </button>
+      </div>
+
+      <div id="panel-text" role="tabpanel" aria-labelledby="mode-text" hidden>
+        <p class="hint">
+          Analyze writing you already have — lyrics, a verse, a poem — and keep its
+          blueprint in the vault. No audio, so nothing is transcribed and nothing is
+          guessed. The text itself is never stored; only the style it reveals.
+        </p>
+        <div class="reel-grid">
+          <div>
+            <div class="field">
+              <label for="trainer-title">Reference name (optional)</label>
+              <input id="trainer-title" placeholder="e.g. Midnight melancholy flow" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="trainer-text">Reference lyrics or text</label>
+              <textarea id="trainer-text" placeholder="Paste lyrics, a verse, or a poem…"></textarea>
+            </div>
+            <button id="train-style-btn" type="button" disabled>Extract style &amp; save to vault</button>
+            <div id="trainer-status" class="status" role="status" aria-live="polite"></div>
+          </div>
+          <div>
+            <div id="trainer-results" hidden>
+              <div class="dna-summary blueprint">
+                <div class="dna-row">
+                  <span class="dna-label">Feel</span>
+                  <span id="trainer-feel" class="badge badge-feel">—</span>
+                </div>
+                <div class="dna-row">
+                  <span class="dna-label">Cadence</span>
+                  <span id="trainer-cadence" class="badge badge-cadence">—</span>
+                </div>
+                <div class="dna-row">
+                  <span class="dna-label">Metaphor domains</span>
+                  <div id="trainer-domains" class="domains-flex"></div>
+                </div>
+                <div class="dna-row">
+                  <span class="dna-label">Literary devices</span>
+                  <div id="trainer-devices" class="domains-flex"></div>
+                </div>
+                <p id="trainer-summary" class="summary"></p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="panel-reel" role="tabpanel" aria-labelledby="mode-reel">
+        <p class="hint">
+          Upload a clip and it is transcribed, deconstructed into feel, cadence and
+          imagery, and turned into original lyrics on your own topic.
+        </p>
       <div class="reel-grid">
         <div>
           <div id="drop-zone" class="drop-zone" role="button" tabindex="0"
@@ -485,6 +556,7 @@
             <pre id="reel-lyrics"></pre>
           </div>
         </div>
+      </div>
       </div>
     </section>
 

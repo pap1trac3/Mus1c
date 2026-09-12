@@ -724,3 +724,86 @@ async function forgetProfile(id, button) {
 $('refresh-memory-btn').addEventListener('click', loadStyleMemory);
 
 loadStyleMemory();
+
+// ---------------------------------------------------------------------------
+// Train the vault from pasted text — no audio, nothing transcribed
+// ---------------------------------------------------------------------------
+
+// Bound with addEventListener rather than inline onclick: helmet sets
+// script-src 'self', which blocks inline handlers outright.
+function switchTrainMode(mode) {
+  const isText = mode === 'text';
+  $('panel-text').hidden = !isText;
+  $('panel-reel').hidden = isText;
+  $('mode-text').setAttribute('aria-selected', String(isText));
+  $('mode-reel').setAttribute('aria-selected', String(!isText));
+}
+
+$('mode-reel').addEventListener('click', () => switchTrainMode('reel'));
+$('mode-text').addEventListener('click', () => switchTrainMode('text'));
+
+/** One pill per entry, built with textContent — these are model outputs. */
+function paintPills(container, values, className) {
+  const list = Array.isArray(values) ? values.filter(Boolean) : [];
+  container.replaceChildren(...(list.length ? list : ['None identified']).map((value) => {
+    const pill = document.createElement('span');
+    pill.className = 'badge ' + className;
+    pill.textContent = value;
+    return pill;
+  }));
+}
+
+function syncTrainButton() {
+  $('train-style-btn').disabled = $('trainer-text').value.trim().length === 0;
+}
+
+$('trainer-text').addEventListener('input', syncTrainButton);
+
+$('train-style-btn').addEventListener('click', async () => {
+  const status = $('trainer-status');
+  const button = $('train-style-btn');
+  const referenceText = $('trainer-text').value.trim();
+  const title = $('trainer-title').value.trim();
+
+  if (!referenceText) return;
+
+  button.disabled = true;
+  status.className = 'status busy';
+  status.innerHTML = '';
+  status.appendChild(Object.assign(document.createElement('span'), { className: 'spinner' }));
+  status.appendChild(document.createTextNode('Reading the style…'));
+
+  try {
+    const response = await fetch('/api/train-style', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reference_text: referenceText, title }),
+    });
+    if (!response.ok) throw await asError(response);
+
+    const result = await response.json();
+    const dna = result.style_dna || {};
+
+    $('trainer-feel').textContent = dna.feel || 'Unknown';
+    $('trainer-cadence').textContent = dna.cadence || 'Unknown';
+    paintPills($('trainer-domains'), dna.metaphor_domains, 'badge-domain');
+    paintPills($('trainer-devices'), dna.literary_devices, 'badge-cadence');
+    $('trainer-summary').textContent = result.summary || '';
+    $('trainer-results').hidden = false;
+
+    setStatus(
+      status,
+      'Style saved — read from ' + result.reference_chars +
+        ' characters. Later generations will draw on it.',
+      'ok'
+    );
+    loadStyleMemory();
+  } catch (err) {
+    // A status message, not alert(): the rest of the page reports this way.
+    setStatus(status, err.message, 'err', err.details);
+  } finally {
+    syncTrainButton();
+  }
+});
+
+syncTrainButton();

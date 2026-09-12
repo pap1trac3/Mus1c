@@ -9,7 +9,7 @@ const OpenAI = require('openai');
 const { DataAPIClient, TooManyDocumentsToCountError } = require('@datastax/astra-db-ts');
 const { VaultRepository } = require('./lib/vaultRepository');
 const { AppError, attempt, asyncHandler } = require('./lib/errors');
-const { ingestSchema, generateSchema, validateBody } = require('./lib/validation');
+const { ingestSchema, generateSchema, trainStyleSchema, validateBody } = require('./lib/validation');
 const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
 const { logger, httpLogger } = require('./lib/logger');
 const { createReadinessChecker } = require('./lib/readiness');
@@ -21,6 +21,7 @@ const { isolateVocals } = require('./lib/vocalSeparation');
 const {
   reelUpload,
   analysisSystemPrompt,
+  styleOnlySystemPrompt,
   parseAnalysis,
   MAX_UPLOAD_BYTES,
   TRANSCRIBE_MODEL,
@@ -769,6 +770,78 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
       !askedToRemember || profileId ? null : quality.verdict === 'empty' || quality.verdict === 'low'
         ? 'low_transcript_quality'
         : 'vault_write_failed',
+  });
+}));
+
+/**
+ * Trains the vault from pasted text — lyrics, a verse, a poem — with no audio
+ * and no lyric generation. The transcription path is the least reliable link
+ * in the reel pipeline; when the words are already in hand, this skips it
+ * entirely and is deterministic by comparison.
+ *
+ * The reference text is never persisted, exactly as a reel transcript is not:
+ * what goes into the vault is the derived blueprint, in the same document
+ * shape reel profiles use so retrieval, listing and deletion all keep working.
+ */
+app.post('/api/train-style', strictLimiter, validateBody(trainStyleSchema), asyncHandler(async (req, res) => {
+  const { reference_text: referenceText, title } = req.body;
+
+  const startedAt = Date.now();
+  req.log.info({ text_chars: referenceText.length, titled: Boolean(title) }, 'style training requested');
+
+  const analysis = await attempt('Failed to analyze the reference text', async () => {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: styleOnlySystemPrompt },
+        {
+          role: 'user',
+          content: `${title ? `Title: ${title}\n\n` : ''}Reference text:\n${referenceText}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      // Analysis, not composition: the same text should yield the same
+      // blueprint rather than a different reading each time.
+      temperature: 0.2,
+    });
+    return parseAnalysis(completion.choices[0]?.message?.content);
+  });
+
+  // Unlike the reel path this is not best-effort. There is no analysis to
+  // salvage if the write fails — training the vault IS the whole request — so
+  // a failure here is a failure, reported as one.
+  const profileDoc = await attempt('Failed to save the style to the vault', async () => {
+    const profileText = buildProfileText({
+      style_dna: analysis.style_dna,
+      source: 'text',
+      title,
+    });
+    const doc = buildProfileDocument({
+      vector: await createEmbedding(profileText),
+      style_dna: analysis.style_dna,
+      source: 'text',
+      title,
+    });
+
+    await withRetry(() => vaultRepo.insertChunks([doc]), {
+      log: req.log,
+      label: 'style profile write',
+    });
+    return doc;
+  });
+
+  req.log.info(
+    { profile_id: profileDoc.metadata.document_id, total_ms: Date.now() - startedAt },
+    'style learned from text'
+  );
+
+  res.status(201).json({
+    success: true,
+    profile_id: profileDoc.metadata.document_id,
+    style_dna: analysis.style_dna,
+    summary: analysis.summary,
+    // Never the reference text itself — only how much of it was read.
+    reference_chars: referenceText.length,
   });
 }));
 
