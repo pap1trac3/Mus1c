@@ -82,6 +82,8 @@ describe('GET /api/style-memory', () => {
         feel: 'Atmospheric / late-night reflective',
         cadence: '6-8 syllables, heavy slant rhyme',
         metaphor_domains: ['Night driving', 'Weather'],
+        literary_devices: [],
+        source: 'reel',
         topic: 'moving on',
         source_name: 'clip.mp3',
         learned_at: '2026-09-11T00:00:00.000Z',
