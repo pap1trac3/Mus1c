@@ -264,6 +264,17 @@
     white-space: nowrap; }
   .dupe-meter { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
   .dupe-meter span { display: block; height: 100%; background: var(--accent); }
+  .wordplay { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .wordplay h4 { margin: 12px 0 6px; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); }
+  .wordplay h4:first-child { margin-top: 0; }
+  .wordplay-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .wordplay-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+  .wordplay-text { font-size: 0.9rem; overflow-wrap: anywhere; }
+  .wordplay-note { font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
+  .wordplay-count { font-variant-numeric: tabular-nums; color: var(--accent); white-space: nowrap;
+    font-size: 0.78rem; }
   .dupe-detail { font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
   .dupe-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .grid-scroll { overflow-x: auto; margin-bottom: 10px; }
@@ -512,10 +523,27 @@
           <button id="rhyme-toggle" type="button" class="btn-icon" aria-pressed="false" disabled>
             Rhyme overlay
           </button>
+          <button id="wordplay-btn" type="button" class="btn-icon" disabled>
+            Wordplay on selection
+          </button>
         </div>
         <div id="rhyme-legend" class="rhyme-legend" hidden></div>
         <pre id="lyrics-out"></pre>
         <div id="retrieval-meta" class="meta"></div>
+
+        <p class="hint">
+          Highlight a line in the sheet above and ask for wordplay: second readings,
+          metaphor domains that could carry a whole verse, and multi-syllabic phrases
+          that rhyme with where the line lands.
+        </p>
+        <div id="wordplay-status" class="status" role="status" aria-live="polite"></div>
+        <div id="wordplay-panel" class="wordplay" hidden>
+          <div class="lyric-toolbar">
+            <h3 id="wordplay-line">Wordplay</h3>
+            <button id="wordplay-close" type="button" class="btn-icon">Close</button>
+          </div>
+          <div id="wordplay-body"></div>
+        </div>
 
         <h3>Rhyme scheme</h3>
         <p class="hint">

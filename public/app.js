@@ -114,6 +114,7 @@ async function handleGenerate(event) {
   renderRhymeLegend(null);
   syncRhymeToggle();
   syncSchemeCapture();
+  hideWordplay();
   renderBarGrid(null);
   syncSectionPicker('');
   setStatus($('rewrite-status'), '');
@@ -1312,6 +1313,171 @@ function syncSectionPicker(sheet) {
 }
 
 // ---------------------------------------------------------------------------
+// Wordplay on a highlighted line
+// ---------------------------------------------------------------------------
+
+// Matches the API's own bound on one line.
+const MAX_WORDPLAY_LINE = 300;
+
+/**
+ * The line the writer highlighted, or '' if there isn't one.
+ *
+ * Only a selection inside the lyric pane counts — highlighting the hint text
+ * above it is not a request about a lyric. A selection spanning several lines
+ * is read as its first line: these suggestions are about one line's turn of
+ * phrase, and asking about a whole verse gets a verse's worth of vague answers.
+ */
+function selectedLyricLine() {
+  const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return '';
+
+  const range = selection.getRangeAt(0);
+  if (!$('lyrics-out').contains(range.commonAncestorContainer)) return '';
+
+  const [first] = selection.toString().split('\n').map((line) => line.trim()).filter(Boolean);
+  return (first || '').slice(0, MAX_WORDPLAY_LINE);
+}
+
+function syncWordplayButton() {
+  $('wordplay-btn').disabled = !lastResult || selectedLyricLine() === '';
+}
+
+document.addEventListener('selectionchange', syncWordplayButton);
+
+function hideWordplay() {
+  $('wordplay-panel').hidden = true;
+  $('wordplay-body').replaceChildren();
+  setStatus($('wordplay-status'), '');
+}
+
+$('wordplay-close').addEventListener('click', hideWordplay);
+
+/** One suggestion: its text, and the smaller line under it. */
+function wordplayItem(text, note, count) {
+  const item = document.createElement('li');
+  item.className = 'wordplay-item';
+
+  const top = document.createElement('div');
+  top.className = 'dupe-top';
+
+  const main = document.createElement('span');
+  main.className = 'wordplay-text';
+  // textContent everywhere below: every string here is model output.
+  main.textContent = text;
+  top.append(main);
+
+  if (count) {
+    const badge = document.createElement('span');
+    badge.className = 'wordplay-count';
+    badge.textContent = count;
+    top.append(badge);
+  }
+
+  item.append(top);
+
+  if (note) {
+    const sub = document.createElement('div');
+    sub.className = 'wordplay-note';
+    sub.textContent = note;
+    item.append(sub);
+  }
+
+  return item;
+}
+
+function wordplaySection(heading, items) {
+  const title = document.createElement('h4');
+  title.textContent = heading;
+
+  const list = document.createElement('ul');
+  list.className = 'wordplay-list';
+  list.append(...items);
+
+  return [title, list];
+}
+
+function renderWordplay(result) {
+  const body = $('wordplay-body');
+  const nodes = [];
+
+  if (result.double_entendres.length > 0) {
+    nodes.push(...wordplaySection('Second readings', result.double_entendres.map((entry) =>
+      wordplayItem(entry.text, entry.plays_on ? 'plays on "' + entry.plays_on + '"' : '')
+    )));
+  }
+
+  if (result.metaphor_clusters.length > 0) {
+    nodes.push(...wordplaySection('Metaphor clusters', result.metaphor_clusters.map((cluster) => {
+      const item = wordplayItem(cluster.domain, '');
+      const pills = document.createElement('div');
+      pills.className = 'domains-flex';
+      paintPills(pills, cluster.images, 'badge-domain');
+      item.append(pills);
+      return item;
+    })));
+  }
+
+  if (result.rhyme_extensions.length > 0) {
+    nodes.push(...wordplaySection(
+      'Rhymes with "' + result.rhyme_target + '"',
+      result.rhyme_extensions.map((entry) =>
+        wordplayItem(entry.phrase, entry.note, entry.syllables + ' syll.')
+      )
+    ));
+  }
+
+  if (result.rhymes_dropped > 0) {
+    const dropped = document.createElement('p');
+    dropped.className = 'wordplay-note';
+    // The counter, not the model, decided these were not rhymes — worth saying,
+    // because it is the number that tells a writer how hard this one was.
+    dropped.textContent =
+      result.rhymes_dropped + ' more ' + (result.rhymes_dropped === 1 ? 'suggestion' : 'suggestions') +
+      ' did not rhyme with "' + result.rhyme_target + '" and were dropped.';
+    nodes.push(dropped);
+  }
+
+  $('wordplay-line').textContent = 'Wordplay on: ' + result.line;
+  body.replaceChildren(...nodes);
+  $('wordplay-panel').hidden = false;
+}
+
+$('wordplay-btn').addEventListener('click', async () => {
+  const status = $('wordplay-status');
+  const button = $('wordplay-btn');
+  const line = selectedLyricLine();
+
+  if (!lastResult || !line) return;
+
+  button.disabled = true;
+  setStatus(status, 'Working on "' + line + '"…', 'busy');
+
+  try {
+    const response = await fetch('/api/wordplay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        line,
+        // The surrounding sheet is sent for register only; the server neither
+        // stores nor echoes it.
+        sheet: lastResult.structured_lyrics || '',
+        genre: $('genre').value.trim(),
+        theme: $('theme').value.trim(),
+        tone: $('tone-mode').value,
+      }),
+    });
+    if (!response.ok) throw await asError(response);
+
+    renderWordplay(await response.json());
+    setStatus(status, '');
+  } catch (err) {
+    setStatus(status, err.message, 'err', err.details);
+  } finally {
+    syncWordplayButton();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Rhyme scheme presets
 //
 // What the writer pins here outranks both a named blend profile and whatever
@@ -1523,6 +1689,7 @@ $('rewrite-btn').addEventListener('click', async () => {
     renderRhymeLegend(lastResult);
     syncRhymeToggle();
     syncSchemeCapture();
+    hideWordplay();
     renderBarGrid(lastResult);
     syncSectionPicker(result.structured_lyrics);
     rememberDraft(lastResult, result.section);

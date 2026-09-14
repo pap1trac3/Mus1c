@@ -15,6 +15,7 @@ const {
   trainStyleSchema,
   profileTagsSchema,
   sectionSchema,
+  wordplaySchema,
   validateBody,
 } = require('./lib/validation');
 const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
@@ -29,6 +30,7 @@ const {
   replaceSection,
 } = require('./lib/lyricFormat');
 const { analyzeProsody, buildBarGrid, mapRhymes } = require('./lib/prosody');
+const { buildWordplayMessages, parseWordplay, verifyRhymes } = require('./lib/wordplay');
 
 // The bar grid is timed from this, so a nonsense tempo would misplace every
 // line. Bounds match what the prompt asks the model for.
@@ -1306,6 +1308,54 @@ app.post('/api/generate/section', strictLimiter, validateBody(sectionSchema), as
       ? { cadence_profile_id: brief.cadence_source, imagery_profile_id: brief.imagery_source }
       : null,
     missing_profile_ids: missingProfiles,
+    tone: normalizeTone(req.body.tone),
+  });
+}));
+
+/**
+ * Proposes wordplay for one highlighted line: second readings, metaphor
+ * domains that could carry a whole verse, and multi-syllabic phrases that
+ * rhyme with where the line lands.
+ *
+ * The line comes from the caller for the same reason a section rewrite's sheet
+ * does — nothing is persisted, so there is no server-side draft to point at.
+ * Neither the line nor the sheet is stored, embedded or logged.
+ */
+app.post('/api/wordplay', strictLimiter, validateBody(wordplaySchema), asyncHandler(async (req, res) => {
+  const { line, sheet } = req.body;
+
+  req.log.info({ with_sheet: Boolean(sheet) }, 'wordplay requested');
+
+  const proposals = await attempt('Failed to generate wordplay', async () => {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini',
+      messages: buildWordplayMessages({
+        line,
+        sheet,
+        genre: req.body.genre,
+        theme: req.body.theme,
+        tone: toneInstruction(req.body.tone),
+      }),
+      response_format: { type: 'json_object' },
+      // Above the composing temperature: the job here is to find the reading
+      // that is not the obvious one.
+      temperature: 0.9,
+    });
+    return parseWordplay(completion.choices[0]?.message?.content);
+  });
+
+  const { kept, dropped, target } = verifyRhymes(line, proposals.rhymeExtensions);
+
+  res.json({
+    line,
+    rhyme_target: target,
+    double_entendres: proposals.doubleEntendres,
+    metaphor_clusters: proposals.metaphorClusters,
+    rhyme_extensions: kept,
+    // Reported rather than hidden: these are proposals the syllable counter
+    // found did not rhyme, and a writer who sees the number knows how much of
+    // this list to trust.
+    rhymes_dropped: dropped,
     tone: normalizeTone(req.body.tone),
   });
 }));
