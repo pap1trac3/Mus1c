@@ -117,23 +117,7 @@
   @keyframes blink { to { visibility: hidden; } }
   .meta { color: var(--muted); font-size: 0.78rem; }
 
-  .player { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
-  .player-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .player-controls button { width: auto; padding: 8px 14px; }
   button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
-  .volume { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
-  .volume input { width: 140px; }
-  .volume label, .volume span { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
-  #visualizer-canvas {
-    width: 100%;
-    height: 90px;
-    margin-top: 12px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    display: block;
-  }
-  @media (max-width: 520px) { .volume { margin-left: 0; width: 100%; } .volume input { flex: 1; } }
 
   .dna-summary {
     display: flex;
@@ -244,6 +228,16 @@
   .memory-item .badge-feel { align-self: flex-start; }
   /* Pushed to the bottom so Forget sits on one line across the whole row,
      however much cadence text a card carries. */
+  .rhyme-legend { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font-size: 0.75rem;
+    color: var(--muted); align-items: center; }
+  .rhyme-legend .swatch { display: inline-flex; align-items: center; gap: 5px; }
+  .rhyme-legend .chip { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .rhyme { border-radius: 3px; padding: 0 2px; color: #0f1115; font-weight: 600; }
+  .rhyme-A { background: #c8a45e; } .rhyme-B { background: #7aa2f7; }
+  .rhyme-C { background: #5fb98b; } .rhyme-D { background: #e5646d; }
+  .rhyme-E { background: #c78ee0; } .rhyme-F { background: #e0b062; }
+  .rhyme-G { background: #6fd0c4; } .rhyme-H { background: #d9899f; }
+  .internal-rhyme { text-decoration: underline wavy var(--muted); text-underline-offset: 3px; }
   .draft-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
   .draft-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
@@ -280,8 +274,6 @@
     color: var(--muted); font-weight: 600; }
   .bar-grid td.num { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
   .bar-grid td.line { overflow-wrap: anywhere; }
-  .bar-grid tr.playing td { background: var(--accent-soft); }
-  .bar-grid tr.playing td.line { color: var(--accent); }
   .export-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .memory-item .memory-tags { display: flex; flex-direction: column; gap: 4px; }
   .memory-item .memory-tags label { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.04em;
@@ -456,7 +448,13 @@
         <pre id="stream-out"></pre>
         <h3>Style prompt</h3>
         <pre id="style-out"></pre>
-        <h3>Structured lyrics</h3>
+        <div class="lyric-toolbar">
+          <h3>Structured lyrics</h3>
+          <button id="rhyme-toggle" type="button" class="btn-icon" aria-pressed="false" disabled>
+            Rhyme overlay
+          </button>
+        </div>
+        <div id="rhyme-legend" class="rhyme-legend" hidden></div>
         <pre id="lyrics-out"></pre>
         <div id="retrieval-meta" class="meta"></div>
 
@@ -494,31 +492,11 @@
           </table>
         </div>
         <div class="export-row">
-          <button id="click-btn" type="button" class="btn-icon" disabled>Start click track</button>
-          <span id="click-readout" class="meta"></span>
-        </div>
-        <div class="export-row">
           <button id="export-txt-btn" type="button" class="btn-icon" disabled>Export lyric sheet (.txt)</button>
           <button id="export-csv-btn" type="button" class="btn-icon" disabled>Export bar markers (.csv)</button>
         </div>
       </div>
 
-      <div class="player">
-        <h3>Audio preview</h3>
-        <p class="hint">Plays the motif returned with the generation. Audio starts on click — browsers require a gesture.</p>
-        <div class="player-controls">
-          <button id="play-btn" type="button" disabled>Play</button>
-          <button id="pause-btn" type="button" class="secondary" disabled>Pause</button>
-          <button id="stop-btn" type="button" class="secondary" disabled>Stop</button>
-          <div class="volume">
-            <label for="volume-slider">Volume</label>
-            <input id="volume-slider" type="range" min="-40" max="6" value="-6" step="1">
-            <span id="volume-value">-6 dB</span>
-          </div>
-        </div>
-        <canvas id="visualizer-canvas" width="800" height="90"></canvas>
-        <div id="audio-status" class="status" role="status" aria-live="polite">Generate a track to enable playback.</div>
-      </div>
     </section>
     <section class="full">
       <h2>Train the style vault</h2>
@@ -732,9 +710,6 @@
 
   <!-- All same-origin: helmet's CSP sets script-src 'self', so a CDN tag
        would be blocked outright and inline script is not allowed either. -->
-  <script src="vendor/tone.js"></script>
-  <script src="audio.js"></script>
-  <script src="clickTrack.js"></script>
   <script src="drafts.js"></script>
   <script src="app.js"></script>
 </body>

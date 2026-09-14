@@ -121,8 +121,8 @@ describe('non-streaming generation telemetry', () => {
     expect(res.statusCode).toBe(200);
     // usage is logged, not added to the public response contract.
     expect(Object.keys(res.body).sort()).toEqual(
-      ['bar_grid', 'blend', 'degraded', 'melody', 'missing_profile_ids', 'prosody', 'retrieved_chunks',
-        'retrieved_documents', 'structured_lyrics', 'style_prompt', 'tempo_bpm', 'tone'].sort()
+      ['bar_grid', 'blend', 'degraded', 'missing_profile_ids', 'prosody', 'retrieved_chunks',
+        'retrieved_documents', 'rhyme_map', 'structured_lyrics', 'style_prompt', 'tempo_bpm', 'tone'].sort()
     );
   });
 });

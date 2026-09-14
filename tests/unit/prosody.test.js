@@ -246,3 +246,111 @@ describe('buildBarGrid()', () => {
     expect(buildBarGrid(sheet, { bpm: NaN }).bpm).toBeNull();
   });
 });
+
+describe('mapRhymes()', () => {
+  const { mapRhymes, internalRhymeWords } = require('../../lib/prosody');
+
+  const SHEET = [
+    '[Verse 1]',
+    'Walking through the burning light',
+    'Counting every fallen star',
+    'Nothing left to hold me tight',
+    'Wondering just where you are',
+  ].join('\n');
+
+  it('labels lines that rhyme with each other', () => {
+    const map = mapRhymes(SHEET);
+
+    expect(map.lines.map((line) => line.group)).toEqual(['A', 'B', 'A', 'B']);
+  });
+
+  it('indexes against the raw sheet, headers included', () => {
+    const map = mapRhymes(SHEET);
+
+    // The header is line 0; the first sung line is line 1.
+    expect(map.lines[0].index).toBe(1);
+    expect(SHEET.split('\n')[map.lines[0].index]).toBe('Walking through the burning light');
+  });
+
+  it('reports the end word each group was decided on', () => {
+    const map = mapRhymes(SHEET);
+
+    expect(map.lines.map((line) => line.end_word)).toEqual(['light', 'star', 'tight', 'are']);
+  });
+
+  it('leaves a line that rhymes with nothing unlabelled', () => {
+    const map = mapRhymes('First and only line\nSomething entirely different');
+
+    expect(map.lines.every((line) => line.group === null)).toBe(true);
+    expect(map.groups).toEqual([]);
+  });
+
+  it('matches slant rhyme, not just perfect rhyme', () => {
+    const map = mapRhymes('holding on\nolder song');
+
+    expect(map.lines[0].group).toBe(map.lines[1].group);
+    expect(map.lines[0].group).not.toBeNull();
+  });
+
+  it('skips headers and blank lines entirely', () => {
+    const map = mapRhymes('[Verse 1]\n\nonly line here');
+
+    expect(map.lines).toHaveLength(1);
+  });
+
+  it('survives input that is not a string', () => {
+    expect(mapRhymes(null).lines).toEqual([]);
+    expect(mapRhymes(undefined).groups).toEqual([]);
+  });
+});
+
+describe('internalRhymeWords()', () => {
+  const { internalRhymeWords } = require('../../lib/prosody');
+
+  it('returns both halves of an internal rhyme, not just the second', () => {
+    const words = internalRhymeWords('the rain came down the same old way');
+
+    expect(words).toContain('came');
+    expect(words).toContain('same');
+  });
+
+  it('does not treat a repeated word as rhyming with itself', () => {
+    expect(internalRhymeWords('never never never let go')).toEqual([]);
+  });
+
+  it('returns nothing when rhyme lands only at the line end', () => {
+    expect(internalRhymeWords('walking to the door')).toEqual([]);
+  });
+});
+
+describe('slantKey()', () => {
+  const { slantKey, rhymeKey } = require('../../lib/prosody');
+
+  it('matches a nasal slant rhyme the strict key misses', () => {
+    expect(rhymeKey('time')).not.toBe(rhymeKey('mine'));
+    expect(slantKey('time')).toBe(slantKey('mine'));
+  });
+
+  it('matches across a voiced/unvoiced consonant pair', () => {
+    expect(slantKey('cat')).toBe(slantKey('cad'));
+  });
+
+  it('still requires the vowel to match — otherwise it is alliteration', () => {
+    expect(slantKey('light')).not.toBe(slantKey('start'));
+    expect(slantKey('rain')).not.toBe(slantKey('shadow'));
+  });
+
+  it('treats "ng" as one sound, so "on" and "song" rhyme', () => {
+    expect(slantKey('on')).toBe(slantKey('song'));
+  });
+
+  it('keeps perfect rhymes matching', () => {
+    expect(slantKey('light')).toBe(slantKey('night'));
+    expect(slantKey('seen')).toBe(slantKey('scene'));
+  });
+
+  it('returns empty for a word with no letters', () => {
+    expect(slantKey('...')).toBe('');
+    expect(slantKey(null)).toBe('');
+  });
+});

@@ -111,9 +111,9 @@ async function handleGenerate(event) {
   lyricsOut.textContent = '';
   meta.textContent = '';
   lastResult = null;
-  if (window.clickTrack && window.clickTrack.running) window.clickTrack.stop();
+  renderRhymeLegend(null);
+  syncRhymeToggle();
   renderBarGrid(null);
-  syncClickButton();
   syncSectionPicker('');
   setStatus($('rewrite-status'), '');
   $('export-txt-btn').disabled = true;
@@ -145,12 +145,12 @@ async function handleGenerate(event) {
       },
       onComplete: (result) => {
         styleOut.textContent = result.style_prompt || '';
-        lyricsOut.textContent = result.structured_lyrics || '';
-        loadMelody(result);
         lastResult = result;
+        renderLyrics(result);
+        renderRhymeLegend(result);
+        syncRhymeToggle();
         renderBarGrid(result);
         syncSectionPicker(result.structured_lyrics);
-        syncClickButton();
         rememberDraft(result);
         $('export-txt-btn').disabled = false;
         $('export-csv-btn').disabled = false;
@@ -351,101 +351,6 @@ $('export-txt-btn').addEventListener('click', () => {
 
 $('export-csv-btn').addEventListener('click', () => {
   if (lastResult) downloadFile(stampedName('.csv'), 'text/csv;charset=utf-8', buildMarkerCsv(lastResult));
-});
-
-// ---------------------------------------------------------------------------
-// Audio preview
-// ---------------------------------------------------------------------------
-
-let pendingMelody = null;
-let spectrumFrame = null;
-
-function setPlayerStatus(text, kind) {
-  const el = $('audio-status');
-  el.textContent = text;
-  el.className = 'status' + (kind ? ' ' + kind : '');
-}
-
-/** Called when a generation completes; stores the motif for playback. */
-function loadMelody(result) {
-  pendingMelody = Array.isArray(result.melody) && result.melody.length
-    ? { melody: result.melody, tempo: result.tempo_bpm }
-    : null;
-
-  const playBtn = $('play-btn');
-  if (!pendingMelody) {
-    playBtn.disabled = true;
-    setPlayerStatus('No playable motif in this result.', 'err');
-    return;
-  }
-
-  playBtn.disabled = false;
-  setPlayerStatus(
-    'Ready — ' + pendingMelody.melody.length + ' events at ' + pendingMelody.tempo + ' BPM.',
-    'ok'
-  );
-
-  // If the engine is already running, swap the material in immediately.
-  if (window.audioEngine.initialized) {
-    window.audioEngine.load(pendingMelody.melody, pendingMelody.tempo);
-  }
-}
-
-function drawSpectrum() {
-  const canvas = $('visualizer-canvas');
-  const ctx = canvas.getContext('2d');
-  const values = window.audioEngine.getSpectrum();
-
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const barWidth = canvas.width / values.length;
-  for (let i = 0; i < values.length; i++) {
-    // FFT returns dB, roughly -100 (silence) to 0 (full scale).
-    const magnitude = Math.max(0, Math.min(1, (values[i] + 100) / 100));
-    const barHeight = magnitude * canvas.height;
-    ctx.fillStyle = 'rgba(200, 164, 94, ' + (0.35 + magnitude * 0.65) + ')';
-    ctx.fillRect(i * barWidth, canvas.height - barHeight, Math.max(1, barWidth - 1), barHeight);
-  }
-
-  // Driven by engine state, so the loop ends with playback rather than spinning.
-  if (window.audioEngine.state === 'playing') {
-    spectrumFrame = requestAnimationFrame(drawSpectrum);
-  } else {
-    spectrumFrame = null;
-  }
-}
-
-window.audioEngine.onState = (state) => {
-  const labels = { offline: 'Offline', stopped: 'Stopped', playing: 'Playing', paused: 'Paused' };
-  const kinds = { playing: 'ok', paused: 'busy', stopped: '', offline: '' };
-  setPlayerStatus(labels[state] || state, kinds[state]);
-
-  $('pause-btn').disabled = state !== 'playing';
-  $('stop-btn').disabled = state === 'stopped' || state === 'offline';
-
-  if (state === 'playing' && spectrumFrame === null) drawSpectrum();
-};
-
-$('play-btn').addEventListener('click', async () => {
-  if (!pendingMelody) return;
-  try {
-    setPlayerStatus('Starting audio…', 'busy');
-    // Must happen inside the click handler: AudioContext needs a user gesture.
-    await window.audioEngine.init();
-    window.audioEngine.load(pendingMelody.melody, pendingMelody.tempo);
-    window.audioEngine.play();
-  } catch (err) {
-    setPlayerStatus('Audio failed to start: ' + err.message, 'err');
-  }
-});
-
-$('pause-btn').addEventListener('click', () => window.audioEngine.pause());
-$('stop-btn').addEventListener('click', () => window.audioEngine.stop());
-
-$('volume-slider').addEventListener('input', (event) => {
-  const db = parseFloat(event.target.value);
-  $('volume-value').textContent = db + ' dB';
-  window.audioEngine.setVolume(db);
 });
 
 // ---------------------------------------------------------------------------
@@ -1030,57 +935,119 @@ function paintPills(container, values, className) {
 }
 
 // ---------------------------------------------------------------------------
-// Click track — a metronome for the bar grid
+// Rhyme overlay
 // ---------------------------------------------------------------------------
 
-/** Highlights the bar currently sounding, so the grid reads as a playhead. */
-function markCurrentBar(bar) {
-  const rows = $('bar-grid-body').children;
-  for (const row of rows) {
-    const from = Number(row.dataset.startBar);
-    const to = Number(row.dataset.endBar);
-    row.classList.toggle('playing', bar > 0 && bar >= from && bar <= to);
-  }
-  $('click-readout').textContent = bar > 0 ? 'Bar ' + bar : '';
-}
+let rhymeOverlayOn = false;
 
-function syncClickButton() {
-  const button = $('click-btn');
-  const grid = lastResult && lastResult.bar_grid;
-  const playable = Boolean(grid && grid.bpm && grid.rows && grid.rows.length);
+/**
+ * Renders the sheet with rhyme groups marked.
+ *
+ * Built as DOM nodes, never as an HTML string: every word here is model
+ * output, and an overlay is exactly the place where it would be tempting to
+ * interpolate it into markup.
+ */
+function renderLyrics(result) {
+  const out = $('lyrics-out');
+  const sheet = (result && result.structured_lyrics) || '';
+  const map = result && result.rhyme_map;
 
-  if (!window.clickTrack || !window.clickTrack.supported) {
-    button.disabled = true;
-    button.textContent = 'Click track unavailable';
+  if (!rhymeOverlayOn || !map || !map.lines || map.lines.length === 0) {
+    out.textContent = sheet;
     return;
   }
 
-  button.disabled = !playable;
-  button.textContent = window.clickTrack.running ? 'Stop click track' : 'Start click track';
+  const byIndex = new Map(map.lines.map((line) => [line.index, line]));
+
+  out.replaceChildren(...sheet.split('\n').flatMap((line, index, all) => {
+    const nodes = markLine(line, byIndex.get(index));
+    // Keep the sheet's own line breaks; a <pre> honours them literally.
+    if (index < all.length - 1) nodes.push(document.createTextNode('\n'));
+    return nodes;
+  }));
 }
 
-$('click-btn').addEventListener('click', async () => {
-  const track = window.clickTrack;
-  if (!track || !track.supported) return;
+/** One line, with its end rhyme and any internal rhymes wrapped. */
+function markLine(line, info) {
+  if (!info) return [document.createTextNode(line)];
 
-  if (track.running) {
-    track.stop();
-    syncClickButton();
+  // Word boundaries, so "light" does not match inside "lighthouse".
+  const targets = new Map();
+  for (const word of info.internal || []) targets.set(word.toLowerCase(), 'internal-rhyme');
+
+  const nodes = [];
+  const pattern = /[A-Za-z']+/g;
+  let cursor = 0;
+  let match;
+  let lastWordAt = -1;
+
+  // The end rhyme is the final word, so find where that actually starts.
+  while ((match = pattern.exec(line)) !== null) lastWordAt = match.index;
+  pattern.lastIndex = 0;
+
+  while ((match = pattern.exec(line)) !== null) {
+    const word = match[0];
+    const isEnd = info.group && match.index === lastWordAt;
+    const internalClass = targets.get(word.toLowerCase());
+    if (!isEnd && !internalClass) continue;
+
+    if (match.index > cursor) nodes.push(document.createTextNode(line.slice(cursor, match.index)));
+
+    const span = document.createElement('span');
+    span.className = isEnd ? 'rhyme rhyme-' + info.group : internalClass;
+    if (isEnd) span.title = 'Rhyme group ' + info.group;
+    else span.title = 'Internal rhyme';
+    span.textContent = word;
+    nodes.push(span);
+
+    cursor = match.index + word.length;
+  }
+
+  if (cursor < line.length) nodes.push(document.createTextNode(line.slice(cursor)));
+  return nodes.length ? nodes : [document.createTextNode(line)];
+}
+
+function renderRhymeLegend(result) {
+  const legend = $('rhyme-legend');
+  const groups = (result && result.rhyme_map && result.rhyme_map.groups) || [];
+
+  if (!rhymeOverlayOn || groups.length === 0) {
+    legend.replaceChildren();
+    legend.hidden = true;
     return;
   }
 
-  const grid = lastResult && lastResult.bar_grid;
-  if (!grid || !grid.bpm) return;
+  const swatches = groups.map((group) => {
+    const wrap = document.createElement('span');
+    wrap.className = 'swatch';
+    const chip = document.createElement('span');
+    chip.className = 'chip rhyme-' + group;
+    const label = document.createElement('span');
+    label.textContent = group;
+    wrap.append(chip, label);
+    return wrap;
+  });
 
-  track.configure({ bpm: grid.bpm, beatsPerBar: grid.beats_per_bar, totalBars: grid.total_bars });
-  track.onBar = markCurrentBar;
-  track.onStop = () => {
-    markCurrentBar(0);
-    syncClickButton();
-  };
+  const note = document.createElement('span');
+  note.className = 'swatch';
+  note.textContent = '· wavy underline = internal rhyme';
 
-  await track.start();
-  syncClickButton();
+  legend.replaceChildren(...swatches, note);
+  legend.hidden = false;
+}
+
+function syncRhymeToggle() {
+  const button = $('rhyme-toggle');
+  const available = Boolean(lastResult && lastResult.rhyme_map);
+  button.disabled = !available;
+  button.setAttribute('aria-pressed', String(rhymeOverlayOn && available));
+}
+
+$('rhyme-toggle').addEventListener('click', () => {
+  rhymeOverlayOn = !rhymeOverlayOn;
+  renderLyrics(lastResult);
+  renderRhymeLegend(lastResult);
+  syncRhymeToggle();
 });
 
 // ---------------------------------------------------------------------------
@@ -1182,13 +1149,15 @@ function restoreDraft(draft) {
     structured_lyrics: draft.structured_lyrics || '',
     prosody: draft.prosody || null,
     bar_grid: draft.bar_grid || null,
+    rhyme_map: draft.rhyme_map || null,
   });
 
   $('style-out').textContent = lastResult.style_prompt;
-  $('lyrics-out').textContent = lastResult.structured_lyrics;
+  renderLyrics(lastResult);
+  renderRhymeLegend(lastResult);
+  syncRhymeToggle();
   renderBarGrid(lastResult);
   syncSectionPicker(lastResult.structured_lyrics);
-  syncClickButton();
   $('export-txt-btn').disabled = false;
   $('export-csv-btn').disabled = false;
   hideDraftDiff();
@@ -1241,6 +1210,7 @@ function rememberDraft(result, section) {
     structured_lyrics: result.structured_lyrics,
     prosody: result.prosody || null,
     bar_grid: result.bar_grid || null,
+    rhyme_map: result.rhyme_map || null,
   });
   renderDrafts();
 }
@@ -1334,12 +1304,14 @@ $('rewrite-btn').addEventListener('click', async () => {
       structured_lyrics: result.structured_lyrics,
       prosody: result.prosody,
       bar_grid: result.bar_grid,
+      rhyme_map: result.rhyme_map,
     });
 
-    $('lyrics-out').textContent = result.structured_lyrics;
+    renderLyrics(lastResult);
+    renderRhymeLegend(lastResult);
+    syncRhymeToggle();
     renderBarGrid(lastResult);
     syncSectionPicker(result.structured_lyrics);
-    syncClickButton();
     rememberDraft(lastResult, result.section);
     setStatus(status, 'Rewrote ' + result.section + '.', 'ok');
   } catch (err) {
