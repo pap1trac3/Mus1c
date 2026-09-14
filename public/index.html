@@ -244,7 +244,14 @@
   .memory-item .badge-feel { align-self: flex-start; }
   /* Pushed to the bottom so Forget sits on one line across the whole row,
      however much cadence text a card carries. */
-  .memory-item .memory-actions { display: flex; justify-content: flex-end; margin-top: auto; }
+  .memory-item .memory-tags { display: flex; flex-direction: column; gap: 4px; }
+  .memory-item .memory-tags label { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.04em;
+    text-transform: uppercase; }
+  .memory-item .memory-tags input { width: 100%; font-size: 0.8rem; padding: 6px 8px; }
+  .memory-item .memory-actions { display: flex; justify-content: space-between; align-items: center;
+    gap: 8px; margin-top: auto; }
+  .memory-item .memory-tag-state { font-size: 0.72rem; color: var(--muted); min-height: 1em; }
+  .memory-item .memory-tag-state.err { color: var(--danger); }
   .memory-empty { color: var(--muted); font-size: 0.85rem; margin: 0; }
 
   .mode-switch { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -342,6 +349,14 @@
         <div class="field">
           <label for="retrieval_limit">Retrieval limit (1–20)</label>
           <input id="retrieval_limit" name="retrieval_limit" type="number" min="1" max="20" placeholder="8">
+        </div>
+        <div class="field">
+          <label for="generate-tags">Only these style tags</label>
+          <input id="generate-tags" name="tags" placeholder="aggressive, r&amp;b hook" autocomplete="off">
+          <p class="hint">
+            Comma-separated. Narrows which learned profiles may steer this generation —
+            leave blank to draw on the whole vault. Ingested lyrics are retrieved either way.
+          </p>
         </div>
         <button id="generate-btn" type="submit">Generate</button>
         <div id="generate-status" class="status" role="status" aria-live="polite"></div>

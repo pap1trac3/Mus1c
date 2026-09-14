@@ -83,6 +83,7 @@ describe('GET /api/style-memory', () => {
         cadence: '6-8 syllables, heavy slant rhyme',
         metaphor_domains: ['Night driving', 'Weather'],
         literary_devices: [],
+        tags: [],
         source: 'reel',
         topic: 'moving on',
         source_name: 'clip.mp3',

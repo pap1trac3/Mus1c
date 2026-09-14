@@ -116,7 +116,11 @@ async function handleGenerate(event) {
     const response = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify(Object.assign(collectForm(event.target), { stream: true })),
+      body: JSON.stringify(Object.assign(collectForm(event.target), {
+        // collectForm yields strings; the API takes tags as an array.
+        tags: parseTagInput($('generate-tags').value),
+        stream: true,
+      })),
     });
 
     // Validation and rate-limit responses come back as JSON, not a stream.
@@ -609,6 +613,85 @@ function describeWhen(iso) {
   return learnedAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/** "aggressive, R&B hook" -> ["aggressive", "r&b hook"]. Lowercased to match
+ *  the server's canonical form, so a filter matches however the tag was typed. */
+function parseTagInput(raw) {
+  return String(raw || '')
+    .split(',')
+    .map((tag) => tag.trim().toLowerCase())
+    .filter(Boolean)
+    .filter((tag, i, all) => all.indexOf(tag) === i);
+}
+
+/**
+ * Per-profile tag editor. Saves on `change` — which fires on blur and on
+ * Enter, but not on every keystroke, so typing a list is one request rather
+ * than one per character.
+ */
+function buildTagEditor(profile) {
+  const wrap = document.createElement('div');
+  wrap.className = 'memory-tags';
+
+  const inputId = 'memory-tags-' + profile.id;
+  const label = document.createElement('label');
+  label.setAttribute('for', inputId);
+  label.textContent = 'Tags';
+
+  const input = document.createElement('input');
+  input.id = inputId;
+  input.type = 'text';
+  input.autocomplete = 'off';
+  input.placeholder = 'aggressive, r&b hook';
+  // Model- and user-supplied text: assigned as a value, never parsed as markup.
+  input.value = (Array.isArray(profile.tags) ? profile.tags : []).join(', ');
+
+  const state = document.createElement('span');
+  state.className = 'memory-tag-state';
+  state.setAttribute('role', 'status');
+  state.setAttribute('aria-live', 'polite');
+
+  // What the server last confirmed. A failed save leaves the typed text in
+  // place to be retried, but this is what an unchanged field is compared to,
+  // so a blur with nothing edited never fires a request.
+  let saved = input.value;
+
+  input.addEventListener('change', async () => {
+    if (input.value === saved) return;
+
+    const tags = parseTagInput(input.value);
+    input.disabled = true;
+    state.className = 'memory-tag-state';
+    state.textContent = 'Saving…';
+
+    try {
+      const response = await fetch(
+        '/api/style-memory/' + encodeURIComponent(profile.id) + '/tags',
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tags }),
+        }
+      );
+      if (!response.ok) throw await asError(response);
+
+      const result = await response.json();
+      // Render what was stored, not what was typed: the server lowercases,
+      // dedupes and caps, so the field should show the tags a filter will match.
+      input.value = (result.tags || []).join(', ');
+      saved = input.value;
+      state.textContent = 'Saved';
+    } catch (err) {
+      state.className = 'memory-tag-state err';
+      state.textContent = err.message;
+    } finally {
+      input.disabled = false;
+    }
+  });
+
+  wrap.append(label, input, state);
+  return wrap;
+}
+
 /** One card per learned profile. Every value is model- or user-supplied, so
  *  it is written with textContent and never parsed as markup. */
 function renderStyleMemory(data) {
@@ -673,6 +756,8 @@ function renderStyleMemory(data) {
       }));
       item.appendChild(pills);
     }
+
+    item.appendChild(buildTagEditor(profile));
 
     const actions = document.createElement('div');
     actions.className = 'memory-actions';

@@ -4,6 +4,9 @@ const {
   buildProfileText,
   buildProfileDocument,
   toProfileSummary,
+  normalizeTags,
+  MAX_TAGS,
+  MAX_TAG_CHARS,
 } = require('../../lib/styleMemory');
 
 const DNA = {
@@ -136,6 +139,7 @@ describe('toProfileSummary()', () => {
       cadence: DNA.cadence,
       metaphor_domains: DNA.metaphor_domains,
       literary_devices: [],
+      tags: [],
       source: 'reel',
       topic: 'moving on',
       source_name: 'clip.mp3',
@@ -151,5 +155,41 @@ describe('toProfileSummary()', () => {
     expect(summary.feel).toBe('Unknown');
     expect(summary.metaphor_domains).toEqual([]);
     expect(summary.learned_at).toBeNull();
+  });
+});
+
+describe('normalizeTags()', () => {
+  it('trims and lowercases, so a filter matches however a tag was typed', () => {
+    expect(normalizeTags(['  Aggressive ', 'R&B Hook'])).toEqual(['aggressive', 'r&b hook']);
+  });
+
+  it('dedupes case variants of the same tag', () => {
+    expect(normalizeTags(['Melodic', 'melodic', 'MELODIC'])).toEqual(['melodic']);
+  });
+
+  it('drops blank entries rather than storing empty tags', () => {
+    expect(normalizeTags(['fast', '', '   ', 'slow'])).toEqual(['fast', 'slow']);
+  });
+
+  it('caps how many tags one profile can carry', () => {
+    const tags = normalizeTags(Array.from({ length: MAX_TAGS + 5 }, (_, i) => 'tag' + i));
+
+    expect(tags).toHaveLength(MAX_TAGS);
+  });
+
+  it('truncates an over-long tag instead of storing it whole', () => {
+    const [tag] = normalizeTags(['x'.repeat(MAX_TAG_CHARS + 50)]);
+
+    expect(tag).toHaveLength(MAX_TAG_CHARS);
+  });
+
+  it('reads anything that is not an array as no tags', () => {
+    expect(normalizeTags(undefined)).toEqual([]);
+    expect(normalizeTags('aggressive')).toEqual([]);
+    expect(normalizeTags(null)).toEqual([]);
+  });
+
+  it('ignores non-string entries rather than coercing them', () => {
+    expect(normalizeTags([42, { tag: 'x' }, 'fast'])).toEqual(['fast']);
   });
 });

@@ -9,7 +9,7 @@ const OpenAI = require('openai');
 const { DataAPIClient, TooManyDocumentsToCountError } = require('@datastax/astra-db-ts');
 const { VaultRepository } = require('./lib/vaultRepository');
 const { AppError, attempt, asyncHandler } = require('./lib/errors');
-const { ingestSchema, generateSchema, trainStyleSchema, validateBody } = require('./lib/validation');
+const { ingestSchema, generateSchema, trainStyleSchema, profileTagsSchema, validateBody } = require('./lib/validation');
 const { apiLimiter, strictLimiter } = require('./lib/rateLimiters');
 const { logger, httpLogger } = require('./lib/logger');
 const { createReadinessChecker } = require('./lib/readiness');
@@ -39,6 +39,7 @@ const {
   buildProfileText,
   buildProfileDocument,
   toProfileSummary,
+  normalizeTags,
 } = require('./lib/styleMemory');
 const { toFile } = require('openai');
 
@@ -161,6 +162,51 @@ function groupRetrievedChunks(documents) {
       kind: docs[0].metadata?.kind || LYRIC_KIND,
     };
   });
+}
+
+/**
+ * Retrieval for a generation, optionally narrowed to profiles carrying one of
+ * `tags`.
+ *
+ * Untagged is the fast path and the original behaviour: one unfiltered nearest-
+ * neighbour search over the whole vault.
+ *
+ * Tagged runs two searches instead of one filtered search, because a single
+ * filter cannot express "narrow the profiles but leave everything else alone":
+ * ingested lyric chunks carry neither tags nor `metadata.kind`, so any filter
+ * that selects tagged profiles excludes every chunk in the vault along with
+ * the untagged profiles it is meant to exclude. Splitting the query keeps
+ * ingested lyrics retrievable and lets tags do only the job they were asked to
+ * do. The two result sets are merged on `$similarity`, so the final ranking is
+ * the one a single query would have produced.
+ */
+async function retrieveForGeneration(vector, { limit, tags, log }) {
+  if (tags.length === 0) {
+    return withRetry(() => vaultRepo.findSimilar(vector, { limit }), {
+      log,
+      label: 'vault retrieval',
+    });
+  }
+
+  const [everything, taggedProfiles] = await Promise.all([
+    withRetry(() => vaultRepo.findSimilar(vector, { limit }), {
+      log,
+      label: 'vault retrieval',
+    }),
+    withRetry(() => vaultRepo.findSimilarProfilesByTags(vector, { tags, limit }), {
+      log,
+      label: 'tagged profile retrieval',
+    }),
+  ]);
+
+  // Profiles come only from the tagged search; the general search contributes
+  // the lyric chunks it found and nothing else, so an untagged profile can
+  // never slip back in through it.
+  const chunks = everything.filter((doc) => doc?.metadata?.kind !== STYLE_PROFILE_KIND);
+
+  return [...chunks, ...taggedProfiles]
+    .sort((a, b) => (b.$similarity ?? 0) - (a.$similarity ?? 0))
+    .slice(0, limit);
 }
 
 /**
@@ -394,10 +440,11 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
   const { genre, bpm, key, vocal_timbre, acoustics, theme, retrieval_limit } = req.body;
 
   const limit = Number.isInteger(retrieval_limit) && retrieval_limit > 0 ? retrieval_limit : 8;
+  const tags = normalizeTags(req.body.tags);
   const startedAt = Date.now();
   const streaming = wantsEventStream(req);
 
-  req.log.info({ genre, theme, limit, streaming }, 'generation requested');
+  req.log.info({ genre, theme, limit, tags, streaming }, 'generation requested');
 
   // Retrieval is best-effort: context improves the result but isn't required
   // to produce one, so an upstream failure degrades to an unguided generation
@@ -414,10 +461,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
       .join(', ');
 
     const queryEmbedding = await createEmbedding(queryText);
-    retrieved = await withRetry(() => vaultRepo.findSimilar(queryEmbedding, { limit }), {
-      log: req.log,
-      label: 'vault retrieval',
-    });
+    retrieved = await retrieveForGeneration(queryEmbedding, { limit, tags, log: req.log });
 
     sections = groupRetrievedChunks(retrieved);
     context = sections
@@ -881,6 +925,27 @@ app.get('/api/style-memory', asyncHandler(async (req, res) => {
     profiles: profiles.map(toProfileSummary),
   });
 }));
+
+app.patch(
+  '/api/style-memory/:id/tags',
+  strictLimiter,
+  validateBody(profileTagsSchema),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id || '').slice(0, 200);
+    const tags = normalizeTags(req.body.tags);
+
+    const result = await attempt('Failed to update those tags', () =>
+      vaultRepo.updateProfileTags(id, tags)
+    );
+
+    if (!result?.matchedCount) {
+      return res.status(404).json({ error: 'No learned style profile with that id.' });
+    }
+
+    req.log.info({ profile_id: id, tag_count: tags.length }, 'style profile tags updated');
+    res.json({ success: true, id, tags });
+  })
+);
 
 app.delete('/api/style-memory/:id', strictLimiter, asyncHandler(async (req, res) => {
   const id = String(req.params.id || '').slice(0, 200);
