@@ -334,6 +334,65 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   [hidden] { display: none !important; }
+
+  /* The printable recording sheet. Hidden on screen; on paper it is the only
+     thing on the page. A print stylesheet rather than a bundled PDF writer —
+     the CSP admits no CDN and the browser already lays out pages. */
+  #print-sheet { display: none; }
+  @media print {
+    header, main, footer { display: none !important; }
+    /* The app's own surfaces are dark; paper is not. Reset the ground and the
+       <pre> chrome the screen styles give every code block. */
+    html, body { background: #fff; color: #000; }
+    #print-sheet pre {
+      background: none;
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+      color: #000;
+      max-height: none;
+      overflow: visible;
+    }
+    #print-sheet {
+      display: block;
+      color: #000;
+      background: #fff;
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 11pt;
+      line-height: 1.35;
+    }
+    #print-sheet h1 { font-size: 16pt; margin: 0 0 4pt; }
+    #print-sheet h2 {
+      font-size: 11pt;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin: 16pt 0 6pt;
+      border-bottom: 1px solid #000;
+      padding-bottom: 2pt;
+    }
+    #print-sheet .print-meta { margin: 0 0 2pt; font-size: 9.5pt; }
+    #print-sheet .print-legend { margin: 6pt 0 0; font-size: 8.5pt; font-style: italic; color: #333; }
+    /* Keep a line's annotation, lyric and beat row on the same page. */
+    #print-sheet .print-line { margin: 0 0 8pt; break-inside: avoid; }
+    #print-sheet .print-bars {
+      font-family: inherit;
+      font-size: 8.5pt;
+      color: #333;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    /* Monospaced, and the same size as the lyric: the beat row is aligned by
+       column, so any difference in metrics pulls the markers off the words. */
+    #print-sheet .print-lyric,
+    #print-sheet .print-beats {
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 10.5pt;
+      margin: 0;
+      white-space: pre-wrap;
+    }
+    #print-sheet .print-beats { letter-spacing: 0; }
+    @page { margin: 16mm; }
+  }
 </style>
 </head>
 <body>
@@ -546,7 +605,13 @@
         <div class="export-row">
           <button id="export-txt-btn" type="button" class="btn-icon" disabled>Export lyric sheet (.txt)</button>
           <button id="export-csv-btn" type="button" class="btn-icon" disabled>Export bar markers (.csv)</button>
+          <button id="export-pdf-btn" type="button" class="btn-icon" disabled>Print / save as PDF</button>
         </div>
+        <p class="hint">
+          The .txt and the printed sheet both annotate every line in place with its bars,
+          syllable count and beat markers. PDF comes from the browser's own print dialog —
+          choose "Save as PDF" as the destination.
+        </p>
       </div>
 
     </section>
@@ -760,9 +825,14 @@
     </section>
   </main>
 
+  <!-- Built on demand and shown only by the print stylesheet: "Print / save as
+       PDF" fills this, then hands the page to the browser's print dialog. -->
+  <div id="print-sheet" aria-hidden="true"></div>
+
   <!-- All same-origin: helmet's CSP sets script-src 'self', so a CDN tag
        would be blocked outright and inline script is not allowed either. -->
   <script src="drafts.js"></script>
+  <script src="exports.js"></script>
   <script src="schemes.js"></script>
   <script src="app.js"></script>
 </body>

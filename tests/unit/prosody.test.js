@@ -7,6 +7,7 @@ const {
   internalRhymeDensity,
   analyzeProsody,
   buildBarGrid,
+  beatPositions,
 } = require('../../lib/prosody');
 
 describe('countSyllables()', () => {
@@ -352,5 +353,59 @@ describe('slantKey()', () => {
   it('returns empty for a word with no letters', () => {
     expect(slantKey('...')).toBe('');
     expect(slantKey(null)).toBe('');
+  });
+});
+
+describe('beatPositions()', () => {
+  it('lands a beat every two syllables at the grid\'s own density', () => {
+    // Walk-ing (2) through (1) the (1) burn-ing (2) light (1) — a beat every
+    // second syllable puts one on each of the four words that start on one.
+    expect(beatPositions('Walking through the burning light')).toEqual([
+      { word: 'Walking', column: 0, bar: 1, beat: 1, on_word_start: true },
+      { word: 'through', column: 8, bar: 1, beat: 2, on_word_start: true },
+      { word: 'burning', column: 20, bar: 1, beat: 3, on_word_start: true },
+      { word: 'light', column: 28, bar: 1, beat: 4, on_word_start: true },
+    ]);
+  });
+
+  it('says when a beat falls inside a word rather than nudging it to the nearest', () => {
+    const beats = beatPositions('Counting every fallen star');
+
+    expect(beats.map((b) => [b.beat, b.word, b.on_word_start])).toEqual([
+      [1, 'Counting', true],
+      [2, 'every', true],
+      [3, 'every', false],
+      [4, 'fallen', false],
+    ]);
+  });
+
+  it('keeps columns aligned to the printed line, tags and all', () => {
+    const line = '[whispered] Hold me in the dark';
+    const [first] = beatPositions(line);
+
+    expect(first.word).toBe('Hold');
+    expect(line.slice(first.column, first.column + 4)).toBe('Hold');
+  });
+
+  it('rolls over into the next bar once four beats are used', () => {
+    // Sixteen syllables is eight beats: two full 4/4 bars.
+    const beats = beatPositions('never ever never ever never ever never ever');
+
+    expect(beats).toHaveLength(8);
+    expect(beats[4]).toMatchObject({ bar: 2, beat: 1 });
+    expect(beats[7]).toMatchObject({ bar: 2, beat: 4 });
+  });
+
+  it('has nothing to place on a line with no words', () => {
+    expect(beatPositions('')).toEqual([]);
+    expect(beatPositions('[instrumental]')).toEqual([]);
+    expect(beatPositions(null)).toEqual([]);
+  });
+
+  it('rides along on every bar grid row, so the browser never recounts', () => {
+    const grid = buildBarGrid('[Verse 1]\nWalking through the burning light', { bpm: 120 });
+
+    expect(grid.rows[0].beats).toHaveLength(4);
+    expect(grid.rows[0].beats[0].word).toBe('Walking');
   });
 });

@@ -119,6 +119,7 @@ async function handleGenerate(event) {
   setStatus($('rewrite-status'), '');
   $('export-txt-btn').disabled = true;
   $('export-csv-btn').disabled = true;
+  $('export-pdf-btn').disabled = true;
   setStatus(status, 'Generating…', 'busy');
 
   try {
@@ -157,6 +158,7 @@ async function handleGenerate(event) {
         rememberDraft(result);
         $('export-txt-btn').disabled = false;
         $('export-csv-btn').disabled = false;
+        $('export-pdf-btn').disabled = false;
         meta.textContent =
           'Retrieved ' + result.retrieved_chunks + ' chunk(s) from ' +
           result.retrieved_documents + ' document(s).';
@@ -280,55 +282,6 @@ function renderBarGrid(result) {
   wrap.hidden = false;
 }
 
-/** Seconds as m:ss, so a marker time reads the way a DAW displays it. */
-function formatClock(seconds) {
-  const whole = Math.floor(seconds);
-  const mins = Math.floor(whole / 60);
-  const secs = whole % 60;
-  return mins + ':' + String(secs).padStart(2, '0');
-}
-
-/** Quotes one CSV field: doubles inner quotes and wraps when it has to. */
-function csvField(value) {
-  const text = String(value == null ? '' : value);
-  return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
-}
-
-/**
- * Bar markers as CSV. Generic on purpose — DAWs disagree on marker import
- * formats, so this is name/position/bar columns a user can map, not a claim
- * that any particular DAW imports it untouched.
- */
-function buildMarkerCsv(result) {
-  const grid = (result && result.bar_grid) || { rows: [] };
-  const header = ['name', 'start_seconds', 'start_bar', 'end_bar', 'syllables'];
-  const rows = grid.rows.map((row) =>
-    [row.line, row.start_seconds == null ? '' : row.start_seconds, row.start_bar, row.end_bar, row.syllables]
-      .map(csvField)
-      .join(',')
-  );
-  return [header.join(','), ...rows].join('\n') + '\n';
-}
-
-/** Lyric sheet with bar annotations, for pasting into a session or notes app. */
-function buildLyricSheetText(result) {
-  const grid = (result && result.bar_grid) || { rows: [], bpm: null, total_bars: 0 };
-  const lines = [];
-
-  if (result && result.style_prompt) lines.push('STYLE: ' + result.style_prompt, '');
-  if (grid.bpm) lines.push('TEMPO: ' + grid.bpm + ' BPM · ' + grid.total_bars + ' bars', '');
-
-  // The sheet itself, unaltered — section headers and all — then the grid,
-  // so the lyrics stay copy-pasteable without the annotations in the way.
-  lines.push(result && result.structured_lyrics ? result.structured_lyrics : '', '', 'BAR GRID', '');
-  for (const row of grid.rows) {
-    const bars = row.start_bar === row.end_bar ? 'Bar ' + row.start_bar : 'Bars ' + row.start_bar + '-' + row.end_bar;
-    lines.push('[' + bars + '] (' + row.syllables + ' syll.) ' + row.line);
-  }
-
-  return lines.join('\n');
-}
-
 /**
  * Hands the browser a file. Served from Express rather than a sandboxed frame,
  * so a blob download works; the object URL is revoked once the click is taken.
@@ -349,7 +302,92 @@ function stampedName(extension) {
 }
 
 $('export-txt-btn').addEventListener('click', () => {
-  if (lastResult) downloadFile(stampedName('.txt'), 'text/plain;charset=utf-8', buildLyricSheetText(lastResult));
+  if (lastResult) {
+    downloadFile(stampedName('.txt'), 'text/plain;charset=utf-8', buildRecordingSheetText(lastResult));
+  }
+});
+
+/**
+ * Renders the recording sheet into the page's print container.
+ *
+ * A print stylesheet rather than a PDF library: helmet's CSP allows scripts
+ * from this origin only, so a CDN build would be blocked outright, and
+ * vendoring a PDF writer would put hundreds of kilobytes on every page load to
+ * lay out a page the browser already knows how to lay out. "Save as PDF" in the
+ * print dialog produces the file; printing it produces the sheet.
+ */
+function buildPrintSheet(result) {
+  const sheet = $('print-sheet');
+  const grid = (result && result.bar_grid) || {};
+  const nodes = [];
+
+  const title = document.createElement('h1');
+  title.textContent = 'Recording sheet';
+  nodes.push(title);
+
+  const heading = [];
+  if (grid.bpm) heading.push(grid.bpm + ' BPM');
+  if (grid.beats_per_bar) heading.push(grid.beats_per_bar + '/4');
+  if (grid.total_bars) heading.push(grid.total_bars + ' bars');
+  const mechanics = describeSheetProsody(result && result.prosody);
+  if (mechanics) heading.push(mechanics);
+
+  for (const [className, text] of [
+    ['print-meta', heading.join(' · ')],
+    ['print-meta', result && result.style_prompt ? 'Style: ' + result.style_prompt : ''],
+    ['print-legend', MARKER_LEGEND],
+  ]) {
+    if (!text) continue;
+    const line = document.createElement('p');
+    line.className = className;
+    // textContent: the style prompt is model output.
+    line.textContent = text;
+    nodes.push(line);
+  }
+
+  for (const entry of recordingSheetRows(result)) {
+    if (entry.type === 'blank') continue;
+
+    if (entry.type === 'header') {
+      const header = document.createElement('h2');
+      header.textContent = entry.text;
+      nodes.push(header);
+      continue;
+    }
+
+    const block = document.createElement('div');
+    block.className = 'print-line';
+
+    const note = document.createElement('div');
+    note.className = 'print-bars';
+    note.textContent = annotateRow(entry.row);
+
+    const lyric = document.createElement('pre');
+    lyric.className = 'print-lyric';
+    lyric.textContent = entry.text;
+
+    block.append(note, lyric);
+
+    const markers = beatMarkerRow(entry.row.beats);
+    if (markers.trim()) {
+      const beats = document.createElement('pre');
+      beats.className = 'print-beats';
+      beats.textContent = markers;
+      block.append(beats);
+    }
+
+    nodes.push(block);
+  }
+
+  sheet.replaceChildren(...nodes);
+}
+
+$('export-pdf-btn').addEventListener('click', () => {
+  if (!lastResult) return;
+  buildPrintSheet(lastResult);
+  // The dialog's own "Save as PDF" writes the file; nothing here can write one
+  // without the user choosing where it goes.
+  window.print();
 });
 
 $('export-csv-btn').addEventListener('click', () => {
@@ -1164,6 +1202,7 @@ function restoreDraft(draft) {
   syncSectionPicker(lastResult.structured_lyrics);
   $('export-txt-btn').disabled = false;
   $('export-csv-btn').disabled = false;
+  $('export-pdf-btn').disabled = false;
   hideDraftDiff();
   renderDrafts();
   setStatus($('draft-status'), 'Restored the draft from ' + describeDraftWhen(draft.saved_at) + '.', 'ok');
