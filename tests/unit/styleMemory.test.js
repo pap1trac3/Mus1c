@@ -140,6 +140,12 @@ describe('toProfileSummary()', () => {
       metaphor_domains: DNA.metaphor_domains,
       literary_devices: [],
       tags: [],
+      prosody: {
+        line_count: 0,
+        syllables_per_line: { avg: null, min: null, max: null },
+        rhyme_scheme: 'unknown',
+        internal_rhyme_density: 0,
+      },
       source: 'reel',
       topic: 'moving on',
       source_name: 'clip.mp3',

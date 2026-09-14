@@ -65,8 +65,8 @@ describe('Unit Tests - Helper Functions', () => {
       const sections = groupRetrievedChunks(rawResults);
 
       expect(sections).toEqual([
-        { document_id: 'src-1', text: 'From source', kind: 'lyrics' },
-        { document_id: 'doc-9', text: 'From doc id', kind: 'lyrics' },
+        { document_id: 'src-1', text: 'From source', kind: 'lyrics', prosody: null },
+        { document_id: 'doc-9', text: 'From doc id', kind: 'lyrics', prosody: null },
       ]);
     });
 
@@ -87,6 +87,7 @@ describe('Unit Tests - Helper Functions', () => {
           document_id: 'profile-1',
           text: 'Style profile learned from a reference reel.',
           kind: 'style_profile',
+          prosody: null,
         },
       ]);
     });

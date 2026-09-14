@@ -110,6 +110,10 @@ async function handleGenerate(event) {
   styleOut.textContent = '';
   lyricsOut.textContent = '';
   meta.textContent = '';
+  lastResult = null;
+  renderBarGrid(null);
+  $('export-txt-btn').disabled = true;
+  $('export-csv-btn').disabled = true;
   setStatus(status, 'Generating…', 'busy');
 
   try {
@@ -137,6 +141,10 @@ async function handleGenerate(event) {
         styleOut.textContent = result.style_prompt || '';
         lyricsOut.textContent = result.structured_lyrics || '';
         loadMelody(result);
+        lastResult = result;
+        renderBarGrid(result);
+        $('export-txt-btn').disabled = false;
+        $('export-csv-btn').disabled = false;
         meta.textContent =
           'Retrieved ' + result.retrieved_chunks + ' chunk(s) from ' +
           result.retrieved_documents + ' document(s).';
@@ -190,6 +198,149 @@ async function handleIngest(event) {
 
 $('generate-form').addEventListener('submit', handleGenerate);
 $('ingest-form').addEventListener('submit', handleIngest);
+
+// ---------------------------------------------------------------------------
+// Bar grid and export
+// ---------------------------------------------------------------------------
+
+/** The last generation, kept so the export buttons have something to write. */
+let lastResult = null;
+
+function describeMechanics(prosody) {
+  if (!prosody || !prosody.line_count) return '';
+
+  const perLine = prosody.syllables_per_line || {};
+  const parts = [prosody.line_count + ' sung line' + (prosody.line_count === 1 ? '' : 's')];
+
+  if (typeof perLine.avg === 'number') {
+    parts.push(perLine.avg + ' syllables per line (' + perLine.min + '–' + perLine.max + ')');
+  }
+  if (prosody.rhyme_scheme && prosody.rhyme_scheme !== 'unknown') {
+    parts.push('rhyme ' + prosody.rhyme_scheme);
+  }
+  parts.push('internal rhyme ' + Math.round((prosody.internal_rhyme_density || 0) * 100) + '%');
+
+  return parts.join(' · ');
+}
+
+/** Renders the bar grid. Every lyric line is model output, so it is written
+ *  with textContent and never parsed as markup. */
+function renderBarGrid(result) {
+  const wrap = $('bar-grid-wrap');
+  const body = $('bar-grid-body');
+  const rows = (result && result.bar_grid && result.bar_grid.rows) || [];
+
+  $('mechanics-meta').textContent = describeMechanics(result && result.prosody);
+
+  if (rows.length === 0) {
+    body.replaceChildren();
+    wrap.hidden = true;
+    return;
+  }
+
+  body.replaceChildren(...rows.map((row) => {
+    const tr = document.createElement('tr');
+
+    const bars = document.createElement('td');
+    bars.className = 'num';
+    bars.textContent = row.start_bar === row.end_bar
+      ? String(row.start_bar)
+      : row.start_bar + '–' + row.end_bar;
+
+    const at = document.createElement('td');
+    at.className = 'num';
+    at.textContent = typeof row.start_seconds === 'number' ? formatClock(row.start_seconds) : '—';
+
+    const syllables = document.createElement('td');
+    syllables.className = 'num';
+    syllables.textContent = String(row.syllables);
+
+    const line = document.createElement('td');
+    line.className = 'line';
+    line.textContent = row.line;
+
+    tr.append(bars, at, syllables, line);
+    return tr;
+  }));
+
+  wrap.hidden = false;
+}
+
+/** Seconds as m:ss, so a marker time reads the way a DAW displays it. */
+function formatClock(seconds) {
+  const whole = Math.floor(seconds);
+  const mins = Math.floor(whole / 60);
+  const secs = whole % 60;
+  return mins + ':' + String(secs).padStart(2, '0');
+}
+
+/** Quotes one CSV field: doubles inner quotes and wraps when it has to. */
+function csvField(value) {
+  const text = String(value == null ? '' : value);
+  return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+/**
+ * Bar markers as CSV. Generic on purpose — DAWs disagree on marker import
+ * formats, so this is name/position/bar columns a user can map, not a claim
+ * that any particular DAW imports it untouched.
+ */
+function buildMarkerCsv(result) {
+  const grid = (result && result.bar_grid) || { rows: [] };
+  const header = ['name', 'start_seconds', 'start_bar', 'end_bar', 'syllables'];
+  const rows = grid.rows.map((row) =>
+    [row.line, row.start_seconds == null ? '' : row.start_seconds, row.start_bar, row.end_bar, row.syllables]
+      .map(csvField)
+      .join(',')
+  );
+  return [header.join(','), ...rows].join('\n') + '\n';
+}
+
+/** Lyric sheet with bar annotations, for pasting into a session or notes app. */
+function buildLyricSheetText(result) {
+  const grid = (result && result.bar_grid) || { rows: [], bpm: null, total_bars: 0 };
+  const lines = [];
+
+  if (result && result.style_prompt) lines.push('STYLE: ' + result.style_prompt, '');
+  if (grid.bpm) lines.push('TEMPO: ' + grid.bpm + ' BPM · ' + grid.total_bars + ' bars', '');
+
+  // The sheet itself, unaltered — section headers and all — then the grid,
+  // so the lyrics stay copy-pasteable without the annotations in the way.
+  lines.push(result && result.structured_lyrics ? result.structured_lyrics : '', '', 'BAR GRID', '');
+  for (const row of grid.rows) {
+    const bars = row.start_bar === row.end_bar ? 'Bar ' + row.start_bar : 'Bars ' + row.start_bar + '-' + row.end_bar;
+    lines.push('[' + bars + '] (' + row.syllables + ' syll.) ' + row.line);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Hands the browser a file. Served from Express rather than a sandboxed frame,
+ * so a blob download works; the object URL is revoked once the click is taken.
+ */
+function downloadFile(filename, mime, contents) {
+  const url = URL.createObjectURL(new Blob([contents], { type: mime }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function stampedName(extension) {
+  return 'mozart-lyrics-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + extension;
+}
+
+$('export-txt-btn').addEventListener('click', () => {
+  if (lastResult) downloadFile(stampedName('.txt'), 'text/plain;charset=utf-8', buildLyricSheetText(lastResult));
+});
+
+$('export-csv-btn').addEventListener('click', () => {
+  if (lastResult) downloadFile(stampedName('.csv'), 'text/csv;charset=utf-8', buildMarkerCsv(lastResult));
+});
 
 // ---------------------------------------------------------------------------
 // Audio preview

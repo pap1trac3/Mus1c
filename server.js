@@ -17,6 +17,7 @@ const { withRetry } = require('./lib/retry');
 const { createHeartbeat } = require('./lib/sse');
 const { sanitizeMelody, clampTempo, MAX_EVENTS } = require('./lib/melody');
 const { normalizeLyricSheet } = require('./lib/lyricFormat');
+const { analyzeProsody, buildBarGrid } = require('./lib/prosody');
 const { isolateVocals } = require('./lib/vocalSeparation');
 const {
   reelUpload,
@@ -160,6 +161,7 @@ function groupRetrievedChunks(documents) {
       // profiles keep theirs in `text`. Both are the document's text.
       text: docs.map((d) => d.transcript ?? d.text ?? '').join(' '),
       kind: docs[0].metadata?.kind || LYRIC_KIND,
+      prosody: docs[0].metadata?.prosody || null,
     };
   });
 }
@@ -210,6 +212,55 @@ async function retrieveForGeneration(vector, { limit, tags, log }) {
 }
 
 /**
+ * Turns the measured mechanics of the retrieved profiles into a constraint the
+ * generator can actually follow.
+ *
+ * Only profiles contribute: an ingested lyric chunk is a fragment of someone's
+ * writing, not a style the user chose to learn, so averaging its line lengths
+ * in would blur the target. Averaged across profiles because retrieval returns
+ * several and a single target line length is the useful instruction; the range
+ * is carried too so the model is not pushed into metronomic uniformity.
+ */
+function describeTargetMechanics(sections) {
+  const measured = sections
+    .filter((section) => section.kind === STYLE_PROFILE_KIND && section.prosody)
+    .map((section) => section.prosody)
+    .filter((prosody) => typeof prosody.syllables_per_line?.avg === 'number');
+
+  if (measured.length === 0) return '';
+
+  const avg =
+    measured.reduce((sum, p) => sum + p.syllables_per_line.avg, 0) / measured.length;
+  const min = Math.min(...measured.map((p) => p.syllables_per_line.min ?? p.syllables_per_line.avg));
+  const max = Math.max(...measured.map((p) => p.syllables_per_line.max ?? p.syllables_per_line.avg));
+
+  // The most common named scheme across the retrieved profiles, ignoring the
+  // ones that had too little text to name a shape.
+  const schemes = measured
+    .map((p) => p.rhyme_scheme)
+    .filter((scheme) => scheme && scheme !== 'unknown' && scheme !== 'mixed');
+  const tally = new Map();
+  for (const scheme of schemes) tally.set(scheme, (tally.get(scheme) || 0) + 1);
+  const [dominant] = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+
+  const density =
+    measured.reduce((sum, p) => sum + (p.internal_rhyme_density || 0), 0) / measured.length;
+
+  const lines = [
+    'Measured mechanics of the reference style (counted, not estimated — match them):',
+    `- Target ${Math.round(avg)} syllables per sung line, varying within ${min}-${max}. Do not write every line the same length.`,
+  ];
+  if (dominant) lines.push(`- End-rhyme scheme: ${dominant} per four-line group.`);
+  lines.push(
+    density >= 0.5
+      ? '- Internal rhyme is dense in this style: land rhymes inside the line, not only at its end.'
+      : '- Internal rhyme is sparse in this style: keep rhyme mostly at line ends.'
+  );
+
+  return lines.join('\n');
+}
+
+/**
  * Streaming is opt-in via `stream: true` or an Accept header requesting SSE.
  * Matched as a substring because clients commonly send a list of accepted
  * types rather than the bare type.
@@ -224,7 +275,7 @@ function wantsEventStream(req) {
  * and streaming paths so the two can never drift apart.
  */
 function buildMozartMessages(params) {
-  const { genre, bpm, key, vocal_timbre, acoustics, theme, context } = params;
+  const { genre, bpm, key, vocal_timbre, acoustics, theme, context, mechanics } = params;
 
   const systemPrompt = `You are Mozart AI, an expert AI music producer and vocal arranger. You generate prompts for AI music generation platforms (such as Suno or Udio) from a set of musical parameters and reference lyric context.
 
@@ -259,7 +310,7 @@ Reference context retrieved from the lyric vault (use for inspiration, phrasing,
 - [Learned style profile: ...] — the stylistic fingerprint of a reference clip this user has already fed the tool. Treat these as the house style: match their feel, cadence and metaphor domains.
 - [Source: ...] — a lyric excerpt from the vault, for phrasing and theme only.
 ${context && context.trim().length > 0 ? context : 'No reference context available.'}
-
+${mechanics ? `\n${mechanics}` : ''}
 Return the JSON object now.`;
 
   return [
@@ -482,7 +533,26 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     'vault retrieval complete'
   );
 
-  const generationParams = { genre, bpm, key, vocal_timbre, acoustics, theme, context };
+  const generationParams = {
+    genre, bpm, key, vocal_timbre, acoustics, theme, context,
+    mechanics: describeTargetMechanics(sections),
+  };
+
+  // Both paths return the same body; bar placement is computed here once so
+  // the streaming and buffered responses cannot drift apart.
+  const responseBody = (output) => ({
+    style_prompt: output.style_prompt,
+    structured_lyrics: output.structured_lyrics,
+    tempo_bpm: output.tempo_bpm,
+    melody: output.melody,
+    // Measured from the sheet that was actually written, at the tempo the
+    // model settled on — so the grid matches what the user is about to record.
+    prosody: analyzeProsody(output.structured_lyrics),
+    bar_grid: buildBarGrid(output.structured_lyrics, { bpm: output.tempo_bpm }),
+    retrieved_chunks: retrieved.length,
+    retrieved_documents: sections.length,
+    degraded,
+  });
 
   if (!streaming) {
     const generationStartedAt = Date.now();
@@ -502,15 +572,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
       'generation complete'
     );
 
-    return res.json({
-      style_prompt: output.style_prompt,
-      structured_lyrics: output.structured_lyrics,
-      tempo_bpm: output.tempo_bpm,
-      melody: output.melody,
-      retrieved_chunks: retrieved.length,
-      retrieved_documents: sections.length,
-      degraded,
-    });
+    return res.json(responseBody(output));
   }
 
   // --- SSE path -----------------------------------------------------------
@@ -591,15 +653,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
     // have to reassemble and parse the token stream themselves.
     stopHeartbeat();
     res.write(
-      `event: complete\ndata: ${JSON.stringify({
-        style_prompt: output.style_prompt,
-        structured_lyrics: output.structured_lyrics,
-        tempo_bpm: output.tempo_bpm,
-        melody: output.melody,
-        retrieved_chunks: retrieved.length,
-        retrieved_documents: sections.length,
-        degraded,
-      })}\n\n`
+      `event: complete\ndata: ${JSON.stringify(responseBody(output))}\n\n`
     );
     res.write('data: [DONE]\n\n');
     res.end();
@@ -776,6 +830,10 @@ app.post('/api/analyze-reel', strictLimiter, (req, res, next) => {
         topic,
         lyrics: analysis.generated_lyrics,
         sourceName: req.file?.originalname || 'pasted lyrics',
+        // Measured from the lyrics written in this style, not from the source
+        // transcript — which is never persisted and must not be measured into
+        // the vault either.
+        prosody: analyzeProsody(analysis.generated_lyrics),
       });
 
       await withRetry(() => vaultRepo.insertChunks([profileDoc]), {
@@ -865,6 +923,9 @@ app.post('/api/train-style', strictLimiter, validateBody(trainStyleSchema), asyn
       style_dna: analysis.style_dna,
       source: 'text',
       title,
+      // Derived from the reference text the same way its style DNA is: the
+      // numbers are kept, the text itself still is not.
+      prosody: analyzeProsody(referenceText),
     });
 
     await withRetry(() => vaultRepo.insertChunks([doc]), {

@@ -244,6 +244,15 @@
   .memory-item .badge-feel { align-self: flex-start; }
   /* Pushed to the bottom so Forget sits on one line across the whole row,
      however much cadence text a card carries. */
+  .grid-scroll { overflow-x: auto; margin-bottom: 10px; }
+  .bar-grid { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+  .bar-grid th, .bar-grid td { text-align: left; padding: 5px 10px 5px 0;
+    border-bottom: 1px solid var(--border); }
+  .bar-grid th { font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; }
+  .bar-grid td.num { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+  .bar-grid td.line { overflow-wrap: anywhere; }
+  .export-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .memory-item .memory-tags { display: flex; flex-direction: column; gap: 4px; }
   .memory-item .memory-tags label { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.04em;
     text-transform: uppercase; }
@@ -391,6 +400,26 @@
         <h3>Structured lyrics</h3>
         <pre id="lyrics-out"></pre>
         <div id="retrieval-meta" class="meta"></div>
+
+        <h3>Bar grid</h3>
+        <p class="hint">
+          Bars are estimated from syllable count at the returned tempo — where each line
+          lands if you track it at a conversational eighth-note delivery, not a transcription
+          of audio. Bracketed performance tags are not counted.
+        </p>
+        <div id="mechanics-meta" class="meta"></div>
+        <div id="bar-grid-wrap" class="grid-scroll" hidden>
+          <table id="bar-grid" class="bar-grid">
+            <thead>
+              <tr><th scope="col">Bars</th><th scope="col">In</th><th scope="col">Syll.</th><th scope="col">Line</th></tr>
+            </thead>
+            <tbody id="bar-grid-body"></tbody>
+          </table>
+        </div>
+        <div class="export-row">
+          <button id="export-txt-btn" type="button" class="btn-icon" disabled>Export lyric sheet (.txt)</button>
+          <button id="export-csv-btn" type="button" class="btn-icon" disabled>Export bar markers (.csv)</button>
+        </div>
       </div>
 
       <div class="player">

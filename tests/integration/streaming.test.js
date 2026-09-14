@@ -118,6 +118,8 @@ describe('POST /api/generate - SSE streaming', () => {
       degraded: false,
       tempo_bpm: 120,
       melody: [],
+      prosody: expect.any(Object),
+      bar_grid: expect.any(Object),
     });
   });
 
@@ -153,6 +155,8 @@ describe('POST /api/generate - SSE streaming', () => {
       degraded: false,
       tempo_bpm: 120,
       melody: [],
+      prosody: expect.any(Object),
+      bar_grid: expect.any(Object),
     });
     expect(mockChatCreate.mock.calls[0][0].stream).toBeUndefined();
   });
