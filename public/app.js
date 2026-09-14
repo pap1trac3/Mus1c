@@ -111,7 +111,9 @@ async function handleGenerate(event) {
   lyricsOut.textContent = '';
   meta.textContent = '';
   lastResult = null;
+  if (window.clickTrack && window.clickTrack.running) window.clickTrack.stop();
   renderBarGrid(null);
+  syncClickButton();
   syncSectionPicker('');
   setStatus($('rewrite-status'), '');
   $('export-txt-btn').disabled = true;
@@ -148,6 +150,8 @@ async function handleGenerate(event) {
         lastResult = result;
         renderBarGrid(result);
         syncSectionPicker(result.structured_lyrics);
+        syncClickButton();
+        rememberDraft(result);
         $('export-txt-btn').disabled = false;
         $('export-csv-btn').disabled = false;
         meta.textContent =
@@ -245,6 +249,8 @@ function renderBarGrid(result) {
 
   body.replaceChildren(...rows.map((row) => {
     const tr = document.createElement('tr');
+    tr.dataset.startBar = String(row.start_bar);
+    tr.dataset.endBar = String(row.end_bar);
 
     const bars = document.createElement('td');
     bars.className = 'num';
@@ -1024,6 +1030,231 @@ function paintPills(container, values, className) {
 }
 
 // ---------------------------------------------------------------------------
+// Click track — a metronome for the bar grid
+// ---------------------------------------------------------------------------
+
+/** Highlights the bar currently sounding, so the grid reads as a playhead. */
+function markCurrentBar(bar) {
+  const rows = $('bar-grid-body').children;
+  for (const row of rows) {
+    const from = Number(row.dataset.startBar);
+    const to = Number(row.dataset.endBar);
+    row.classList.toggle('playing', bar > 0 && bar >= from && bar <= to);
+  }
+  $('click-readout').textContent = bar > 0 ? 'Bar ' + bar : '';
+}
+
+function syncClickButton() {
+  const button = $('click-btn');
+  const grid = lastResult && lastResult.bar_grid;
+  const playable = Boolean(grid && grid.bpm && grid.rows && grid.rows.length);
+
+  if (!window.clickTrack || !window.clickTrack.supported) {
+    button.disabled = true;
+    button.textContent = 'Click track unavailable';
+    return;
+  }
+
+  button.disabled = !playable;
+  button.textContent = window.clickTrack.running ? 'Stop click track' : 'Start click track';
+}
+
+$('click-btn').addEventListener('click', async () => {
+  const track = window.clickTrack;
+  if (!track || !track.supported) return;
+
+  if (track.running) {
+    track.stop();
+    syncClickButton();
+    return;
+  }
+
+  const grid = lastResult && lastResult.bar_grid;
+  if (!grid || !grid.bpm) return;
+
+  track.configure({ bpm: grid.bpm, beatsPerBar: grid.beats_per_bar, totalBars: grid.total_bars });
+  track.onBar = markCurrentBar;
+  track.onStop = () => {
+    markCurrentBar(0);
+    syncClickButton();
+  };
+
+  await track.start();
+  syncClickButton();
+});
+
+// ---------------------------------------------------------------------------
+// Draft history
+// ---------------------------------------------------------------------------
+
+/** Which stored draft the diff view is comparing against, if any. */
+let comparedDraftId = null;
+
+function draftLabel(draft) {
+  if (draft.section) return 'Rewrote ' + draft.section;
+  return draft.style_prompt ? draft.style_prompt.split(',')[0].trim() : 'Generation';
+}
+
+function describeDraftWhen(iso) {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+  return at.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/** Renders the history. Every stored value is model output, so textContent. */
+function renderDrafts() {
+  const list = $('draft-list');
+  const drafts = window.draftStore.list();
+
+  if (drafts.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'memory-empty';
+    empty.textContent = 'Nothing generated in this browser yet.';
+    list.replaceChildren(empty);
+    return;
+  }
+
+  list.replaceChildren(...drafts.map((draft) => {
+    const item = document.createElement('li');
+    item.className = 'draft-item';
+    if (lastResult && draft.structured_lyrics === lastResult.structured_lyrics) {
+      item.classList.add('current');
+    }
+
+    const top = document.createElement('div');
+    top.className = 'draft-top';
+
+    const label = document.createElement('span');
+    label.className = 'draft-label';
+    label.textContent = draftLabel(draft);
+
+    const when = document.createElement('span');
+    when.className = 'draft-when';
+    when.textContent = describeDraftWhen(draft.saved_at);
+
+    top.append(label, when);
+    item.appendChild(top);
+
+    const detail = document.createElement('div');
+    detail.className = 'draft-detail';
+    const firstLine = (draft.structured_lyrics || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !(line.startsWith('[') && line.endsWith(']')));
+    detail.textContent = firstLine || '(no lyric lines)';
+    item.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'draft-actions';
+
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'btn-icon';
+    restore.textContent = 'Restore';
+    restore.addEventListener('click', () => restoreDraft(draft));
+
+    const compare = document.createElement('button');
+    compare.type = 'button';
+    compare.className = 'btn-icon';
+    compare.textContent = comparedDraftId === draft.id ? 'Hide changes' : 'Compare';
+    compare.addEventListener('click', () => toggleDraftDiff(draft));
+
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'btn-icon';
+    drop.textContent = 'Delete';
+    drop.addEventListener('click', () => {
+      window.draftStore.remove(draft.id);
+      if (comparedDraftId === draft.id) hideDraftDiff();
+      renderDrafts();
+    });
+
+    actions.append(restore, compare, drop);
+    item.appendChild(actions);
+    return item;
+  }));
+}
+
+/** Puts a stored draft back on screen, exports and bar grid included. */
+function restoreDraft(draft) {
+  lastResult = Object.assign({}, lastResult, {
+    style_prompt: draft.style_prompt || '',
+    structured_lyrics: draft.structured_lyrics || '',
+    prosody: draft.prosody || null,
+    bar_grid: draft.bar_grid || null,
+  });
+
+  $('style-out').textContent = lastResult.style_prompt;
+  $('lyrics-out').textContent = lastResult.structured_lyrics;
+  renderBarGrid(lastResult);
+  syncSectionPicker(lastResult.structured_lyrics);
+  syncClickButton();
+  $('export-txt-btn').disabled = false;
+  $('export-csv-btn').disabled = false;
+  hideDraftDiff();
+  renderDrafts();
+  setStatus($('draft-status'), 'Restored the draft from ' + describeDraftWhen(draft.saved_at) + '.', 'ok');
+}
+
+function hideDraftDiff() {
+  comparedDraftId = null;
+  $('draft-diff-wrap').hidden = true;
+  $('draft-diff').replaceChildren();
+}
+
+function toggleDraftDiff(draft) {
+  if (comparedDraftId === draft.id) {
+    hideDraftDiff();
+    renderDrafts();
+    return;
+  }
+
+  const current = (lastResult && lastResult.structured_lyrics) || '';
+  const rows = window.diffLines(draft.structured_lyrics || '', current);
+  const summary = window.summarizeDiff(rows);
+
+  $('draft-diff-summary').textContent =
+    summary.added + ' added · ' + summary.removed + ' removed · ' + summary.unchanged + ' unchanged';
+
+  $('draft-diff').replaceChildren(...rows.map((row) => {
+    const line = document.createElement('div');
+    line.className = row.type === 'added' ? 'add' : row.type === 'removed' ? 'del' : 'ctx';
+    const marker = row.type === 'added' ? '+ ' : row.type === 'removed' ? '- ' : '  ';
+    line.textContent = marker + row.text;
+    return line;
+  }));
+
+  comparedDraftId = draft.id;
+  $('draft-diff-wrap').hidden = false;
+  renderDrafts();
+}
+
+/** Saves whatever is currently on screen, if it is worth keeping. */
+function rememberDraft(result, section) {
+  if (!result || !result.structured_lyrics) return;
+
+  window.draftStore.save({
+    id: (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)),
+    saved_at: new Date().toISOString(),
+    section: section || null,
+    style_prompt: result.style_prompt || '',
+    structured_lyrics: result.structured_lyrics,
+    prosody: result.prosody || null,
+    bar_grid: result.bar_grid || null,
+  });
+  renderDrafts();
+}
+
+$('clear-drafts-btn').addEventListener('click', () => {
+  window.draftStore.clear();
+  hideDraftDiff();
+  renderDrafts();
+  setStatus($('draft-status'), 'History cleared.', 'ok');
+});
+
+renderDrafts();
+
+// ---------------------------------------------------------------------------
 // Rewriting one section of the current sheet
 // ---------------------------------------------------------------------------
 
@@ -1090,6 +1321,7 @@ $('rewrite-btn').addEventListener('click', async () => {
         bpm: $('bpm').value.trim(),
         cadence_profile_id: $('cadence-profile').value,
         imagery_profile_id: $('imagery-profile').value,
+        tone: $('tone-mode').value,
       }),
     });
     if (!response.ok) throw await asError(response);
@@ -1107,6 +1339,8 @@ $('rewrite-btn').addEventListener('click', async () => {
     $('lyrics-out').textContent = result.structured_lyrics;
     renderBarGrid(lastResult);
     syncSectionPicker(result.structured_lyrics);
+    syncClickButton();
+    rememberDraft(lastResult, result.section);
     setStatus(status, 'Rewrote ' + result.section + '.', 'ok');
   } catch (err) {
     setStatus(status, err.message, 'err', err.details);

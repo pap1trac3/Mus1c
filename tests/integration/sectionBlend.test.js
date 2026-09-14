@@ -373,3 +373,67 @@ describe('duplicate detection on /api/train-style', () => {
     expect(res.body.similar_profiles).toEqual([]);
   });
 });
+
+describe('tone steering', () => {
+  const generation = {
+    choices: [{ message: { content: JSON.stringify({
+      style_prompt: 's', structured_lyrics: '[Verse 1]\nA line', tempo_bpm: 100, melody: [],
+    }) } }],
+  };
+
+  it('adds no language constraint by default', async () => {
+    mockChatCreate.mockResolvedValue(generation);
+
+    const res = await request(app).post('/api/generate').send({ genre: 'lo-fi' });
+
+    expect(userPrompt()).not.toContain('Language constraint');
+    expect(res.body.tone).toBe('raw');
+  });
+
+  it('asks for a radio edit without symbol censoring', async () => {
+    mockChatCreate.mockResolvedValue(generation);
+
+    const res = await request(app).post('/api/generate').send({ genre: 'lo-fi', tone: 'radio' });
+
+    expect(userPrompt()).toContain('Language constraint — radio edit');
+    expect(userPrompt()).toContain('does not need them');
+    expect(res.body.tone).toBe('radio');
+  });
+
+  it('adds brand, real-person and quotation limits for sync-friendly', async () => {
+    mockChatCreate.mockResolvedValue(generation);
+
+    await request(app).post('/api/generate').send({ genre: 'lo-fi', tone: 'sync' });
+
+    expect(userPrompt()).toContain('sync-friendly');
+    expect(userPrompt()).toContain('No brand names');
+    expect(userPrompt()).toContain('No named real people');
+  });
+
+  it('never claims a lyric is cleared — the mode is called sync-friendly', async () => {
+    mockChatCreate.mockResolvedValue(generation);
+
+    await request(app).post('/api/generate').send({ genre: 'lo-fi', tone: 'sync' });
+
+    expect(userPrompt()).not.toContain('sync-safe');
+    expect(userPrompt()).not.toContain('cleared for');
+  });
+
+  it('rejects an unknown mode rather than silently generating unfiltered', async () => {
+    const res = await request(app).post('/api/generate').send({ genre: 'lo-fi', tone: 'anything-goes' });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockChatCreate).not.toHaveBeenCalled();
+  });
+
+  it('carries the constraint into a section rewrite too', async () => {
+    mockChatCreate.mockResolvedValue(sectionOutput('[Chorus]\nClean new hook'));
+
+    const res = await request(app)
+      .post('/api/generate/section')
+      .send({ lyrics: SHEET, section: 'Chorus', tone: 'radio' });
+
+    expect(userPrompt()).toContain('Language constraint — radio edit');
+    expect(res.body.tone).toBe('radio');
+  });
+});

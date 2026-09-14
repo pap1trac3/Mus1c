@@ -122,6 +122,7 @@ describe('POST /api/generate - SSE streaming', () => {
       bar_grid: expect.any(Object),
       blend: null,
       missing_profile_ids: [],
+      tone: 'raw',
     });
   });
 
@@ -161,6 +162,7 @@ describe('POST /api/generate - SSE streaming', () => {
       bar_grid: expect.any(Object),
       blend: null,
       missing_profile_ids: [],
+      tone: 'raw',
     });
     expect(mockChatCreate.mock.calls[0][0].stream).toBeUndefined();
   });

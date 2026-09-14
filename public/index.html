@@ -244,6 +244,20 @@
   .memory-item .badge-feel { align-self: flex-start; }
   /* Pushed to the bottom so Forget sits on one line across the whole row,
      however much cadence text a card carries. */
+  .draft-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+  .draft-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .draft-item.current { border-color: var(--accent); }
+  .draft-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .draft-when { font-size: 0.78rem; color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+  .draft-label { font-size: 0.85rem; font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .draft-detail { font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
+  .draft-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .diff { font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .diff .add { color: var(--ok); }
+  .diff .del { color: var(--danger); text-decoration: line-through; }
+  .diff .ctx { color: var(--muted); }
   .dupe-report { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
   .dupe-report h3 { margin: 0 0 4px; font-size: 0.72rem; text-transform: uppercase;
     letter-spacing: 0.08em; color: var(--muted); }
@@ -266,6 +280,8 @@
     color: var(--muted); font-weight: 600; }
   .bar-grid td.num { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
   .bar-grid td.line { overflow-wrap: anywhere; }
+  .bar-grid tr.playing td { background: var(--accent-soft); }
+  .bar-grid tr.playing td.line { color: var(--accent); }
   .export-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .memory-item .memory-tags { display: flex; flex-direction: column; gap: 4px; }
   .memory-item .memory-tags label { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.04em;
@@ -389,6 +405,20 @@
         </p>
 
         <div class="field">
+          <label for="tone-mode">Language</label>
+          <select id="tone-mode" name="tone">
+            <option value="raw">Unfiltered — match the reference</option>
+            <option value="radio">Radio edit — no profanity or explicit content</option>
+            <option value="sync">Sync-friendly — also no brands, real people or quoted lyrics</option>
+          </select>
+          <p class="hint">
+            A prompt constraint, not a filter: nothing checks the output afterwards.
+            Sync-friendly narrows the odds and flags what to check — it does not clear
+            a lyric for licensing.
+          </p>
+        </div>
+
+        <div class="field">
           <label for="generate-tags">Only these style tags</label>
           <input id="generate-tags" name="tags" placeholder="aggressive, r&amp;b hook" autocomplete="off">
           <p class="hint">
@@ -462,6 +492,10 @@
             </thead>
             <tbody id="bar-grid-body"></tbody>
           </table>
+        </div>
+        <div class="export-row">
+          <button id="click-btn" type="button" class="btn-icon" disabled>Start click track</button>
+          <span id="click-readout" class="meta"></span>
         </div>
         <div class="export-row">
           <button id="export-txt-btn" type="button" class="btn-icon" disabled>Export lyric sheet (.txt)</button>
@@ -662,6 +696,24 @@
     </section>
 
     <section class="full">
+      <div class="memory-header">
+        <h2 style="flex:1;min-width:0">Draft history</h2>
+        <button id="clear-drafts-btn" type="button" class="btn-icon">Clear</button>
+      </div>
+      <p class="hint">
+        Every generated and rewritten sheet from this browser, newest first. Stored locally —
+        it never leaves this device and is not in your vault.
+      </p>
+      <div id="draft-status" class="status" role="status" aria-live="polite"></div>
+      <ul id="draft-list" class="draft-list"></ul>
+      <div id="draft-diff-wrap" hidden>
+        <h3>Changes against the sheet on screen</h3>
+        <div id="draft-diff-summary" class="meta"></div>
+        <pre id="draft-diff" class="diff"></pre>
+      </div>
+    </section>
+
+    <section class="full">
       <h2>Style memory</h2>
       <p class="hint">
         What the vault has learned from your reels. Each entry is a style fingerprint —
@@ -682,6 +734,8 @@
        would be blocked outright and inline script is not allowed either. -->
   <script src="vendor/tone.js"></script>
   <script src="audio.js"></script>
+  <script src="clickTrack.js"></script>
+  <script src="drafts.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
