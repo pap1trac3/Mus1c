@@ -244,6 +244,20 @@
   .memory-item .badge-feel { align-self: flex-start; }
   /* Pushed to the bottom so Forget sits on one line across the whole row,
      however much cadence text a card carries. */
+  .dupe-report { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .dupe-report h3 { margin: 0 0 4px; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); }
+  .dupe-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .dupe-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .dupe-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .dupe-name { font-weight: 600; font-size: 0.85rem; overflow-wrap: anywhere; min-width: 0; flex: 1; }
+  .dupe-score { font-variant-numeric: tabular-nums; font-size: 0.85rem; color: var(--accent);
+    white-space: nowrap; }
+  .dupe-meter { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .dupe-meter span { display: block; height: 100%; background: var(--accent); }
+  .dupe-detail { font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
+  .dupe-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .grid-scroll { overflow-x: auto; margin-bottom: 10px; }
   .bar-grid { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
   .bar-grid th, .bar-grid td { text-align: left; padding: 5px 10px 5px 0;
@@ -359,6 +373,21 @@
           <label for="retrieval_limit">Retrieval limit (1–20)</label>
           <input id="retrieval_limit" name="retrieval_limit" type="number" min="1" max="20" placeholder="8">
         </div>
+        <div class="row">
+          <div class="field">
+            <label for="cadence-profile">Cadence from</label>
+            <select id="cadence-profile"><option value="">Whatever retrieval finds</option></select>
+          </div>
+          <div class="field">
+            <label for="imagery-profile">Imagery &amp; vibe from</label>
+            <select id="imagery-profile"><option value="">Whatever retrieval finds</option></select>
+          </div>
+        </div>
+        <p class="hint">
+          Blend two learned profiles field by field — one supplies the rhythm and syllable
+          target, the other the feel and metaphor domains. Naming one is enough.
+        </p>
+
         <div class="field">
           <label for="generate-tags">Only these style tags</label>
           <input id="generate-tags" name="tags" placeholder="aggressive, r&amp;b hook" autocomplete="off">
@@ -400,6 +429,24 @@
         <h3>Structured lyrics</h3>
         <pre id="lyrics-out"></pre>
         <div id="retrieval-meta" class="meta"></div>
+
+        <h3>Rewrite one section</h3>
+        <p class="hint">
+          Rewrites a single section against the rest of the sheet, leaving every other
+          section exactly as it is.
+        </p>
+        <div class="row">
+          <div class="field">
+            <label for="rewrite-section">Section</label>
+            <select id="rewrite-section" disabled><option value="">Generate something first</option></select>
+          </div>
+          <div class="field">
+            <label for="rewrite-direction">What to change (optional)</label>
+            <input id="rewrite-direction" placeholder="make the hook angrier" autocomplete="off">
+          </div>
+        </div>
+        <button id="rewrite-btn" type="button" class="btn-icon" disabled>Rewrite section</button>
+        <div id="rewrite-status" class="status" role="status" aria-live="polite"></div>
 
         <h3>Bar grid</h3>
         <p class="hint">
@@ -495,6 +542,16 @@
                   <div id="trainer-devices" class="domains-flex"></div>
                 </div>
                 <p id="trainer-summary" class="summary"></p>
+              </div>
+
+              <div id="duplicate-report" class="dupe-report" hidden>
+                <h3>Already in your vault</h3>
+                <p class="hint">
+                  The closest existing profiles by cosine similarity. These scores run high for
+                  any two texts in the same genre, so there is no cutoff — read them relative to
+                  each other and decide.
+                </p>
+                <ul id="duplicate-list" class="dupe-list"></ul>
               </div>
             </div>
           </div>

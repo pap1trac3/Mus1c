@@ -65,3 +65,60 @@ describe('normalizeLyricSheet()', () => {
     expect(normalizeLyricSheet('[Verse 1]\nLine\n\n\n')).toBe('[Verse 1]\nLine');
   });
 });
+
+describe('splitSections()', () => {
+  const { splitSections, findSection, replaceSection } = require('../../lib/lyricFormat');
+
+  const SHEET = '[Verse 1]\nline one\nline two\n\n[Chorus]\nhook line\n\n[Verse 2]\nlast line';
+
+  it('splits a sheet into its sections', () => {
+    expect(splitSections(SHEET).map((s) => s.name)).toEqual(['Verse 1', 'Chorus', 'Verse 2']);
+  });
+
+  it('reassembles into the original sheet, so a rewrite can be put back', () => {
+    expect(splitSections(SHEET).map((s) => s.text).join('\n\n')).toBe(SHEET);
+  });
+
+  it('keeps lines written before any header rather than dropping them', () => {
+    const sections = splitSections('an orphan line\n\n[Chorus]\nhook');
+
+    expect(sections[0].header).toBeNull();
+    expect(sections[0].lines).toEqual(['an orphan line']);
+  });
+
+  it('does not treat an inline performance tag as a section header', () => {
+    const sections = splitSections('[Verse 1]\n[whispered] a quiet line');
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0].lines).toEqual(['[whispered] a quiet line']);
+  });
+
+  it('returns nothing for empty input', () => {
+    expect(splitSections('')).toEqual([]);
+    expect(splitSections(null)).toEqual([]);
+  });
+});
+
+describe('findSection() and replaceSection()', () => {
+  const { splitSections, findSection, replaceSection } = require('../../lib/lyricFormat');
+  const sections = splitSections('[Verse 1]\nline one\n\n[Chorus]\nhook line');
+
+  it('finds a section by its exact name, case-insensitively', () => {
+    expect(findSection(sections, 'chorus')).toBe(1);
+  });
+
+  it('falls back to a prefix match when numbering is omitted', () => {
+    expect(findSection(sections, 'verse')).toBe(0);
+  });
+
+  it('reports -1 rather than guessing when nothing matches', () => {
+    expect(findSection(sections, 'bridge')).toBe(-1);
+    expect(findSection(sections, '')).toBe(-1);
+  });
+
+  it('replaces one section and leaves every other byte-identical', () => {
+    const updated = replaceSection(sections, 1, '[Chorus]\nnew hook');
+
+    expect(updated).toBe('[Verse 1]\nline one\n\n[Chorus]\nnew hook');
+  });
+});

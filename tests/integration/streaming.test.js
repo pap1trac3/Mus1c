@@ -120,6 +120,8 @@ describe('POST /api/generate - SSE streaming', () => {
       melody: [],
       prosody: expect.any(Object),
       bar_grid: expect.any(Object),
+      blend: null,
+      missing_profile_ids: [],
     });
   });
 
@@ -157,6 +159,8 @@ describe('POST /api/generate - SSE streaming', () => {
       melody: [],
       prosody: expect.any(Object),
       bar_grid: expect.any(Object),
+      blend: null,
+      missing_profile_ids: [],
     });
     expect(mockChatCreate.mock.calls[0][0].stream).toBeUndefined();
   });

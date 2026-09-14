@@ -112,6 +112,8 @@ async function handleGenerate(event) {
   meta.textContent = '';
   lastResult = null;
   renderBarGrid(null);
+  syncSectionPicker('');
+  setStatus($('rewrite-status'), '');
   $('export-txt-btn').disabled = true;
   $('export-csv-btn').disabled = true;
   setStatus(status, 'Generating…', 'busy');
@@ -123,6 +125,8 @@ async function handleGenerate(event) {
       body: JSON.stringify(Object.assign(collectForm(event.target), {
         // collectForm yields strings; the API takes tags as an array.
         tags: parseTagInput($('generate-tags').value),
+        cadence_profile_id: $('cadence-profile').value,
+        imagery_profile_id: $('imagery-profile').value,
         stream: true,
       })),
     });
@@ -143,6 +147,7 @@ async function handleGenerate(event) {
         loadMelody(result);
         lastResult = result;
         renderBarGrid(result);
+        syncSectionPicker(result.structured_lyrics);
         $('export-txt-btn').disabled = false;
         $('export-csv-btn').disabled = false;
         meta.textContent =
@@ -847,6 +852,7 @@ function buildTagEditor(profile) {
  *  it is written with textContent and never parsed as markup. */
 function renderStyleMemory(data) {
   const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+  syncProfileSelectors(profiles);
   const count = typeof data.count === 'number' ? data.count : profiles.length;
 
   $('memory-count').textContent =
@@ -957,6 +963,34 @@ async function forgetProfile(id, button) {
   }
 }
 
+/**
+ * Keeps the blend selectors in step with the vault, preserving the current
+ * choice across a refresh so a reload does not silently un-blend a request.
+ */
+function syncProfileSelectors(profiles) {
+  for (const id of ['cadence-profile', 'imagery-profile']) {
+    const select = $(id);
+    const previous = select.value;
+
+    const options = [Object.assign(document.createElement('option'), {
+      value: '',
+      textContent: 'Whatever retrieval finds',
+    })];
+
+    for (const profile of profiles) {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      // Model- and user-supplied: set as text, never parsed as markup.
+      option.textContent = (profile.source_name || 'profile') + ' — ' + (profile.feel || 'Unknown');
+      options.push(option);
+    }
+
+    select.replaceChildren(...options);
+    // Only restore a choice that still exists; a deleted profile clears.
+    if (previous && profiles.some((profile) => profile.id === previous)) select.value = previous;
+  }
+}
+
 $('refresh-memory-btn').addEventListener('click', loadStyleMemory);
 
 loadStyleMemory();
@@ -987,6 +1021,205 @@ function paintPills(container, values, className) {
     pill.textContent = value;
     return pill;
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Rewriting one section of the current sheet
+// ---------------------------------------------------------------------------
+
+/** Section headers of the sheet on screen, so the picker offers what exists. */
+function sheetSectionNames(sheet) {
+  const names = [];
+  for (const raw of String(sheet || '').split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('[') && line.endsWith(']')) {
+      const name = line.slice(1, -1).trim();
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
+function syncSectionPicker(sheet) {
+  const select = $('rewrite-section');
+  const names = sheetSectionNames(sheet);
+
+  if (names.length === 0) {
+    select.replaceChildren(Object.assign(document.createElement('option'), {
+      value: '',
+      textContent: 'Generate something first',
+    }));
+    select.disabled = true;
+    $('rewrite-btn').disabled = true;
+    return;
+  }
+
+  const previous = select.value;
+  select.replaceChildren(...names.map((name) => {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    return option;
+  }));
+  if (names.includes(previous)) select.value = previous;
+
+  select.disabled = false;
+  $('rewrite-btn').disabled = false;
+}
+
+$('rewrite-btn').addEventListener('click', async () => {
+  const status = $('rewrite-status');
+  const button = $('rewrite-btn');
+  const section = $('rewrite-section').value;
+
+  if (!lastResult || !section) return;
+
+  button.disabled = true;
+  setStatus(status, 'Rewriting ' + section + '…', 'busy');
+
+  try {
+    const response = await fetch('/api/generate/section', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lyrics: lastResult.structured_lyrics || '',
+        section,
+        direction: $('rewrite-direction').value.trim(),
+        genre: $('genre').value.trim(),
+        theme: $('theme').value.trim(),
+        bpm: $('bpm').value.trim(),
+        cadence_profile_id: $('cadence-profile').value,
+        imagery_profile_id: $('imagery-profile').value,
+      }),
+    });
+    if (!response.ok) throw await asError(response);
+
+    const result = await response.json();
+
+    // Fold the rewrite into the result on screen so the bar grid, the exports
+    // and a second rewrite all act on the updated sheet rather than the old one.
+    lastResult = Object.assign({}, lastResult, {
+      structured_lyrics: result.structured_lyrics,
+      prosody: result.prosody,
+      bar_grid: result.bar_grid,
+    });
+
+    $('lyrics-out').textContent = result.structured_lyrics;
+    renderBarGrid(lastResult);
+    syncSectionPicker(result.structured_lyrics);
+    setStatus(status, 'Rewrote ' + result.section + '.', 'ok');
+  } catch (err) {
+    setStatus(status, err.message, 'err', err.details);
+  } finally {
+    button.disabled = !lastResult;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Duplicate detection after training
+// ---------------------------------------------------------------------------
+
+/** Renders the nearest existing profiles with their raw similarity scores. */
+function renderDuplicates(matches) {
+  const report = $('duplicate-report');
+  const list = $('duplicate-list');
+  const rows = Array.isArray(matches) ? matches : [];
+
+  if (rows.length === 0) {
+    list.replaceChildren();
+    report.hidden = true;
+    return;
+  }
+
+  list.replaceChildren(...rows.map((match) => {
+    const item = document.createElement('li');
+    item.className = 'dupe-item';
+
+    const top = document.createElement('div');
+    top.className = 'dupe-top';
+
+    const name = document.createElement('span');
+    name.className = 'dupe-name';
+    name.textContent = match.source_name || 'profile';
+
+    const score = document.createElement('span');
+    score.className = 'dupe-score';
+    score.textContent = typeof match.similarity === 'number'
+      ? Math.round(match.similarity * 100) + '%'
+      : '—';
+
+    top.append(name, score);
+    item.appendChild(top);
+
+    if (typeof match.similarity === 'number') {
+      const meter = document.createElement('div');
+      meter.className = 'dupe-meter';
+      const fill = document.createElement('span');
+      // Clamped: a similarity outside 0-1 would otherwise render off the bar.
+      fill.style.width = Math.max(0, Math.min(100, Math.round(match.similarity * 100))) + '%';
+      meter.appendChild(fill);
+      item.appendChild(meter);
+    }
+
+    const detail = document.createElement('div');
+    detail.className = 'dupe-detail';
+    detail.textContent = (match.feel || 'Unknown') + ' · ' + (match.cadence || 'Unknown');
+    item.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'dupe-actions';
+
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'btn-icon';
+    forget.textContent = 'Forget the older one';
+    forget.addEventListener('click', () => forgetProfile(match.id, forget));
+    actions.appendChild(forget);
+
+    if ((match.tags || []).length) {
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'btn-icon';
+      copy.textContent = 'Copy its tags to the new one';
+      copy.addEventListener('click', () => copyTags(match, copy));
+      actions.appendChild(copy);
+    }
+
+    item.appendChild(actions);
+    return item;
+  }));
+
+  report.hidden = false;
+}
+
+/** The profile just trained, so its tags can inherit from a near-duplicate. */
+let lastTrainedProfileId = null;
+
+async function copyTags(match, button) {
+  if (!lastTrainedProfileId) return;
+
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = 'Copying…';
+
+  try {
+    const response = await fetch(
+      '/api/style-memory/' + encodeURIComponent(lastTrainedProfileId) + '/tags',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: match.tags || [] }),
+      }
+    );
+    if (!response.ok) throw await asError(response);
+
+    button.textContent = 'Tags copied';
+    loadStyleMemory();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = original;
+    setStatus($('trainer-status'), err.message, 'err', err.details);
+  }
 }
 
 function syncTrainButton() {
@@ -1025,6 +1258,8 @@ $('train-style-btn').addEventListener('click', async () => {
     paintPills($('trainer-domains'), dna.metaphor_domains, 'badge-domain');
     paintPills($('trainer-devices'), dna.literary_devices, 'badge-cadence');
     $('trainer-summary').textContent = result.summary || '';
+    lastTrainedProfileId = result.profile_id || null;
+    renderDuplicates(result.similar_profiles);
     $('trainer-results').hidden = false;
 
     setStatus(
