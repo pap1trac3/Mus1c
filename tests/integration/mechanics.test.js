@@ -117,7 +117,8 @@ describe('measured mechanics in the generation prompt', () => {
     await request(app).post('/api/generate').send({ genre: 'lo-fi' });
 
     expect(userPrompt()).toContain('Target 14 syllables per sung line, varying within 12-16');
-    expect(userPrompt()).toContain('End-rhyme scheme: AABB');
+    // The scheme alone: the tally that picked it is not part of the instruction.
+    expect(userPrompt()).toContain('End-rhyme scheme: AABB per four-line group.');
   });
 
   it('steers toward internal rhyme only when the reference is actually dense', async () => {
@@ -166,6 +167,91 @@ describe('measured mechanics in the generation prompt', () => {
 
     // Mean of 8 and 12, across the widest observed range.
     expect(userPrompt()).toContain('Target 10 syllables per sung line, varying within 7-14');
+  });
+});
+
+describe('a saved scheme preset steering the generation', () => {
+  const RETRIEVED = {
+    line_count: 8,
+    syllables_per_line: { avg: 14, min: 12, max: 16 },
+    rhyme_scheme: 'AABB',
+    internal_rhyme_density: 0.1,
+  };
+
+  it('outranks the retrieved profiles on every field it pins', async () => {
+    mockFindSimilar.mockResolvedValue([profileDoc(RETRIEVED)]);
+
+    await request(app)
+      .post('/api/generate')
+      .send({
+        genre: 'lo-fi',
+        scheme: {
+          rhyme_scheme: 'ABAB',
+          syllables_avg: 8,
+          syllables_min: 6,
+          syllables_max: 10,
+          internal_rhyme_density: 0.9,
+        },
+      });
+
+    expect(userPrompt()).toContain('Mechanics pinned for this sheet');
+    expect(userPrompt()).toContain('Target 8 syllables per sung line, varying within 6-10');
+    expect(userPrompt()).toContain('End-rhyme scheme: ABAB per four-line group.');
+    expect(userPrompt()).toContain('Internal rhyme is dense');
+    expect(userPrompt()).not.toContain('AABB');
+  });
+
+  it('leaves the fields it does not pin to the reference style', async () => {
+    mockFindSimilar.mockResolvedValue([profileDoc(RETRIEVED)]);
+
+    await request(app)
+      .post('/api/generate')
+      .send({ genre: 'lo-fi', scheme: { rhyme_scheme: 'ABAB' } });
+
+    expect(userPrompt()).toContain('End-rhyme scheme: ABAB per four-line group.');
+    expect(userPrompt()).toContain('Target 14 syllables per sung line, varying within 12-16');
+    expect(userPrompt()).toContain('Internal rhyme is sparse');
+  });
+
+  it('widens an inherited range that would not contain the pinned average', async () => {
+    mockFindSimilar.mockResolvedValue([profileDoc(RETRIEVED)]);
+
+    await request(app)
+      .post('/api/generate')
+      .send({ genre: 'lo-fi', scheme: { syllables_avg: 20 } });
+
+    expect(userPrompt()).toContain('Target 20 syllables per sung line, varying within 12-20');
+  });
+
+  it('steers on its own when nothing was retrieved to measure', async () => {
+    mockFindSimilar.mockResolvedValue([]);
+
+    await request(app)
+      .post('/api/generate')
+      .send({ genre: 'lo-fi', scheme: { syllables_min: 6, syllables_max: 10 } });
+
+    // No average given, so the midpoint of the pinned range is the target.
+    expect(userPrompt()).toContain('Target 8 syllables per sung line, varying within 6-10');
+  });
+
+  it('says nothing when the preset pins nothing', async () => {
+    mockFindSimilar.mockResolvedValue([]);
+
+    await request(app)
+      .post('/api/generate')
+      .send({ genre: 'lo-fi', scheme: { rhyme_scheme: '', syllables_avg: '' } });
+
+    expect(userPrompt()).not.toContain('Mechanics pinned');
+    expect(userPrompt()).not.toContain('syllables per sung line');
+  });
+
+  it('rejects a range that runs backwards', async () => {
+    const res = await request(app)
+      .post('/api/generate')
+      .send({ genre: 'lo-fi', scheme: { syllables_min: 14, syllables_max: 6 } });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toContain('syllables_min must not exceed syllables_max');
   });
 });
 

@@ -272,62 +272,127 @@ async function loadStyleBrief({ cadenceId, imageryId, log }) {
 }
 
 /**
- * Turns the measured mechanics of the retrieved profiles into a constraint the
- * generator can actually follow.
+ * Turns the mechanics the sheet should hit into a constraint the generator can
+ * actually follow. Three sources feed it, in descending order of how
+ * explicitly the writer asked for them:
  *
- * Only profiles contribute: an ingested lyric chunk is a fragment of someone's
- * writing, not a style the user chose to learn, so averaging its line lengths
- * in would blur the target. Averaged across profiles because retrieval returns
- * several and a single target line length is the useful instruction; the range
- * is carried too so the model is not pushed into metronomic uniformity.
+ *   preset   - a scheme template the writer saved and selected. Every field it
+ *              sets is a deliberate instruction, so each one overrides below.
+ *   override - the blend profile whose cadence the writer named. Retrieval's
+ *              average must not dilute a rhythm they picked by name.
+ *   sections - what retrieval found. Only profiles contribute: an ingested
+ *              lyric chunk is a fragment of someone's writing, not a style the
+ *              writer chose to learn, so averaging its line lengths in would
+ *              blur the target.
+ *
+ * Averaged across profiles because retrieval returns several and a single
+ * target line length is the useful instruction; the range is carried too so the
+ * model is not pushed into metronomic uniformity.
  */
-function describeTargetMechanics(sections, override) {
-  // An explicitly chosen blend wins: the user named the profile whose rhythm
-  // they want, so retrieval's average must not dilute it.
-  if (override && typeof override.syllables_per_line?.avg === 'number') {
-    return formatMechanics([override]);
-  }
-
-  const measured = sections
-    .filter((section) => section.kind === STYLE_PROFILE_KIND && section.prosody)
-    .map((section) => section.prosody)
-    .filter((prosody) => typeof prosody.syllables_per_line?.avg === 'number');
-
-  if (measured.length === 0) return '';
-  return formatMechanics(measured);
+function describeTargetMechanics(sections, override, preset) {
+  const target = applyPreset(measuredTarget(sections, override), preset);
+  return target ? formatMechanics(target) : '';
 }
 
-/** The measured numbers as an instruction the generator can follow. */
-function formatMechanics(measured) {
-  const avg =
-    measured.reduce((sum, p) => sum + p.syllables_per_line.avg, 0) / measured.length;
-  const min = Math.min(...measured.map((p) => p.syllables_per_line.min ?? p.syllables_per_line.avg));
-  const max = Math.max(...measured.map((p) => p.syllables_per_line.max ?? p.syllables_per_line.avg));
+/** The averaged prosody of whichever profiles are speaking, or null. */
+function measuredTarget(sections, override) {
+  const measured =
+    override && typeof override.syllables_per_line?.avg === 'number'
+      ? [override]
+      : sections
+          .filter((section) => section.kind === STYLE_PROFILE_KIND && section.prosody)
+          .map((section) => section.prosody)
+          .filter((prosody) => typeof prosody.syllables_per_line?.avg === 'number');
 
-  // The most common named scheme across the retrieved profiles, ignoring the
-  // ones that had too little text to name a shape.
-  const schemes = measured
-    .map((p) => p.rhyme_scheme)
-    .filter((scheme) => scheme && scheme !== 'unknown' && scheme !== 'mixed');
+  if (measured.length === 0) return null;
+
+  // The most common named scheme across the profiles, ignoring the ones that
+  // had too little text to name a shape.
   const tally = new Map();
-  for (const scheme of schemes) tally.set(scheme, (tally.get(scheme) || 0) + 1);
+  for (const { rhyme_scheme: scheme } of measured) {
+    if (!scheme || scheme === 'unknown' || scheme === 'mixed') continue;
+    tally.set(scheme, (tally.get(scheme) || 0) + 1);
+  }
   const [dominant] = [...tally.entries()].sort((a, b) => b[1] - a[1]);
 
-  const density =
-    measured.reduce((sum, p) => sum + (p.internal_rhyme_density || 0), 0) / measured.length;
+  return {
+    pinned: false,
+    avg: measured.reduce((sum, p) => sum + p.syllables_per_line.avg, 0) / measured.length,
+    min: Math.min(...measured.map((p) => p.syllables_per_line.min ?? p.syllables_per_line.avg)),
+    max: Math.max(...measured.map((p) => p.syllables_per_line.max ?? p.syllables_per_line.avg)),
+    rhyme_scheme: dominant ? dominant[0] : null,
+    density: measured.reduce((sum, p) => sum + (p.internal_rhyme_density || 0), 0) / measured.length,
+  };
+}
 
+const EMPTY_TARGET = { pinned: false, avg: null, min: null, max: null, rhyme_scheme: null, density: null };
+
+/**
+ * Folds a saved preset over the measured target. A preset may pin one field and
+ * leave the rest to the reference style, so each field is applied on its own.
+ */
+function applyPreset(target, preset) {
+  if (!preset) return target;
+
+  const next = { ...(target || EMPTY_TARGET) };
+  if (typeof preset.syllables_avg === 'number') next.avg = preset.syllables_avg;
+  if (typeof preset.syllables_min === 'number') next.min = preset.syllables_min;
+  if (typeof preset.syllables_max === 'number') next.max = preset.syllables_max;
+  if (preset.rhyme_scheme) next.rhyme_scheme = preset.rhyme_scheme;
+  if (typeof preset.internal_rhyme_density === 'number') next.density = preset.internal_rhyme_density;
+
+  next.pinned = next.pinned || Object.values(preset).some((value) => value !== undefined);
+
+  // A preset that pins the average alone would otherwise inherit a range from
+  // the measured profiles that does not contain it.
+  if (typeof next.avg === 'number') {
+    if (typeof next.min === 'number') next.min = Math.min(next.min, next.avg);
+    if (typeof next.max === 'number') next.max = Math.max(next.max, next.avg);
+  }
+
+  return next;
+}
+
+/** The target numbers as an instruction the generator can follow. */
+function formatMechanics(target) {
   const lines = [
-    'Measured mechanics of the reference style (counted, not estimated — match them):',
-    `- Target ${Math.round(avg)} syllables per sung line, varying within ${min}-${max}. Do not write every line the same length.`,
+    target.pinned
+      ? 'Mechanics pinned for this sheet (the writer chose these — follow them exactly):'
+      : 'Measured mechanics of the reference style (counted, not estimated — match them):',
   ];
-  if (dominant) lines.push(`- End-rhyme scheme: ${dominant} per four-line group.`);
-  lines.push(
-    density >= 0.5
-      ? '- Internal rhyme is dense in this style: land rhymes inside the line, not only at its end.'
-      : '- Internal rhyme is sparse in this style: keep rhyme mostly at line ends.'
-  );
 
-  return lines.join('\n');
+  // A preset that gives only a range still implies a centre to write toward.
+  const avg =
+    typeof target.avg === 'number'
+      ? target.avg
+      : typeof target.min === 'number' && typeof target.max === 'number'
+        ? (target.min + target.max) / 2
+        : null;
+
+  if (typeof avg === 'number') {
+    const low = typeof target.min === 'number' ? target.min : Math.round(avg);
+    const high = typeof target.max === 'number' ? target.max : Math.round(avg);
+    lines.push(
+      low === high
+        ? `- Target ${Math.round(avg)} syllables per sung line.`
+        : `- Target ${Math.round(avg)} syllables per sung line, varying within ${low}-${high}. Do not write every line the same length.`
+    );
+  }
+
+  if (target.rhyme_scheme) {
+    lines.push(`- End-rhyme scheme: ${target.rhyme_scheme} per four-line group.`);
+  }
+
+  if (typeof target.density === 'number') {
+    lines.push(
+      target.density >= 0.5
+        ? '- Internal rhyme is dense in this style: land rhymes inside the line, not only at its end.'
+        : '- Internal rhyme is sparse in this style: keep rhyme mostly at line ends.'
+    );
+  }
+
+  // Header alone is not an instruction: an empty preset steers nothing.
+  return lines.length > 1 ? lines.join('\n') : '';
 }
 
 /**
@@ -718,7 +783,7 @@ app.post('/api/generate', strictLimiter, validateBody(generateSchema), asyncHand
   const generationParams = {
     genre, bpm, key, vocal_timbre, acoustics, theme, context,
     brief: describeStyleBrief(brief),
-    mechanics: describeTargetMechanics(sections, brief?.prosody),
+    mechanics: describeTargetMechanics(sections, brief?.prosody, req.body.scheme),
     tone: toneInstruction(req.body.tone),
   };
 
@@ -1206,7 +1271,7 @@ app.post('/api/generate/section', strictLimiter, validateBody(sectionSchema), as
   // does: a rewritten verse should sit at the line length of the verses around
   // it rather than at some unrelated average.
   const sheetProsody = analyzeProsody(lyrics);
-  const mechanics = describeTargetMechanics([], brief?.prosody || sheetProsody);
+  const mechanics = describeTargetMechanics([], brief?.prosody || sheetProsody, req.body.scheme);
 
   req.log.info(
     { section: sections[index].name, sections: sections.length, blended: Boolean(brief) },

@@ -247,6 +247,40 @@ describe('style blending on /api/generate', () => {
     expect(userPrompt()).toContain('Target 14 syllables per sung line');
   });
 
+  it('lets a pinned preset outrank even the named cadence profile', async () => {
+    mockFindProfilesByIds.mockResolvedValue([profile('A')]);
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({
+        style_prompt: 's', structured_lyrics: '[Verse 1]\nA line', tempo_bpm: 100, melody: [],
+      }) } }],
+    });
+
+    await request(app)
+      .post('/api/generate')
+      .send({
+        genre: 'lo-fi',
+        cadence_profile_id: 'A',
+        scheme: { syllables_avg: 6, syllables_min: 5, syllables_max: 7, rhyme_scheme: 'ABAB' },
+      });
+
+    expect(userPrompt()).toContain('Target 6 syllables per sung line, varying within 5-7');
+    expect(userPrompt()).toContain('End-rhyme scheme: ABAB per four-line group.');
+  });
+
+  it('carries the preset into a section rewrite, over the sheet it is rewriting', async () => {
+    await request(app)
+      .post('/api/generate/section')
+      .send({
+        lyrics: SHEET,
+        section: 'Chorus',
+        scheme: { syllables_avg: 12, syllables_min: 10, syllables_max: 14, rhyme_scheme: 'AABB' },
+      });
+
+    expect(userPrompt()).toContain('Mechanics pinned for this sheet');
+    expect(userPrompt()).toContain('Target 12 syllables per sung line, varying within 10-14');
+    expect(userPrompt()).toContain('End-rhyme scheme: AABB per four-line group.');
+  });
+
   it('reports which blend was applied', async () => {
     mockFindProfilesByIds.mockResolvedValue([profile('A'), profile('B')]);
     mockChatCreate.mockResolvedValue({

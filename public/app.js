@@ -113,6 +113,7 @@ async function handleGenerate(event) {
   lastResult = null;
   renderRhymeLegend(null);
   syncRhymeToggle();
+  syncSchemeCapture();
   renderBarGrid(null);
   syncSectionPicker('');
   setStatus($('rewrite-status'), '');
@@ -129,6 +130,7 @@ async function handleGenerate(event) {
         tags: parseTagInput($('generate-tags').value),
         cadence_profile_id: $('cadence-profile').value,
         imagery_profile_id: $('imagery-profile').value,
+        scheme: currentScheme(),
         stream: true,
       })),
     });
@@ -149,6 +151,7 @@ async function handleGenerate(event) {
         renderLyrics(result);
         renderRhymeLegend(result);
         syncRhymeToggle();
+        syncSchemeCapture();
         renderBarGrid(result);
         syncSectionPicker(result.structured_lyrics);
         rememberDraft(result);
@@ -1156,6 +1159,7 @@ function restoreDraft(draft) {
   renderLyrics(lastResult);
   renderRhymeLegend(lastResult);
   syncRhymeToggle();
+  syncSchemeCapture();
   renderBarGrid(lastResult);
   syncSectionPicker(lastResult.structured_lyrics);
   $('export-txt-btn').disabled = false;
@@ -1268,6 +1272,174 @@ function syncSectionPicker(sheet) {
   $('rewrite-btn').disabled = false;
 }
 
+// ---------------------------------------------------------------------------
+// Rhyme scheme presets
+//
+// What the writer pins here outranks both a named blend profile and whatever
+// retrieval measured — see describeTargetMechanics in server.js. A blank field
+// is not pinned at all, so the reference style still supplies it.
+// ---------------------------------------------------------------------------
+
+const SCHEME_FIELDS = ['scheme-pattern', 'scheme-avg', 'scheme-min', 'scheme-max', 'scheme-density'];
+
+/** The panel read raw, for normalizing or saving. */
+function schemeFieldValues() {
+  return {
+    rhyme_scheme: $('scheme-pattern').value,
+    syllables_avg: $('scheme-avg').value,
+    syllables_min: $('scheme-min').value,
+    syllables_max: $('scheme-max').value,
+    internal_rhyme_density: $('scheme-density').value,
+  };
+}
+
+/**
+ * The panel as the API's `scheme` payload, or undefined when nothing is pinned
+ * — undefined so JSON.stringify drops the key rather than sending an empty
+ * object the server would have to read as "pin nothing".
+ */
+function currentScheme() {
+  return normalizeScheme(schemeFieldValues()) || undefined;
+}
+
+function fillSchemeFields(scheme) {
+  const values = scheme || {};
+  const number = (value) => (typeof value === 'number' ? String(value) : '');
+
+  $('scheme-pattern').value = values.rhyme_scheme || '';
+  $('scheme-avg').value = number(values.syllables_avg);
+  $('scheme-min').value = number(values.syllables_min);
+  $('scheme-max').value = number(values.syllables_max);
+
+  // The select offers two positions because the generator only ever asks
+  // "dense or sparse?" of this number, so snapping to the nearer one shows the
+  // writer exactly the instruction their preset produces.
+  const density = values.internal_rhyme_density;
+  $('scheme-density').value = typeof density === 'number' ? (density >= 0.5 ? '0.8' : '0.1') : '';
+}
+
+function renderSchemePresets(selectedId) {
+  const select = $('scheme-preset');
+  const presets = schemeStore.all();
+
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = 'Custom — not saved';
+
+  select.replaceChildren(
+    blank,
+    ...presets.map((preset) => {
+      const option = document.createElement('option');
+      option.value = preset.id;
+      // textContent throughout: a preset name is whatever the writer typed.
+      option.textContent = preset.name + ' — ' + describeScheme(preset.scheme);
+      return option;
+    })
+  );
+
+  const selected = presets.find((preset) => preset.id === selectedId);
+  select.value = selected ? selected.id : '';
+  $('scheme-delete-btn').disabled = !selected || Boolean(selected.builtin);
+}
+
+function syncSchemeStatus() {
+  const scheme = currentScheme();
+  setStatus(
+    $('scheme-status'),
+    scheme
+      ? 'Pinned: ' + describeScheme(scheme) + '. Applies to the next generation and to rewrites.'
+      : 'Nothing pinned — the reference style sets the mechanics.'
+  );
+}
+
+/** Capturing needs a measured sheet to copy from. */
+function syncSchemeCapture() {
+  const measured = lastResult && lastResult.prosody;
+  $('scheme-capture-btn').disabled = typeof measured?.syllables_per_line?.avg !== 'number';
+}
+
+/** Editing any field means the panel is no longer the preset that filled it. */
+function markSchemeCustom() {
+  $('scheme-preset').value = '';
+  $('scheme-delete-btn').disabled = true;
+  syncSchemeStatus();
+}
+
+for (const id of SCHEME_FIELDS) {
+  // Both events: `input` does not fire on a <select> in every browser.
+  $(id).addEventListener('input', markSchemeCustom);
+  $(id).addEventListener('change', markSchemeCustom);
+}
+
+$('scheme-preset').addEventListener('change', () => {
+  const preset = schemeStore.find($('scheme-preset').value);
+  if (preset) {
+    fillSchemeFields(preset.scheme);
+    // A built-in cannot be overwritten, so its name is not offered as one.
+    $('scheme-name').value = preset.builtin ? '' : preset.name;
+  }
+  $('scheme-delete-btn').disabled = !preset || Boolean(preset.builtin);
+  syncSchemeStatus();
+});
+
+$('scheme-save-btn').addEventListener('click', () => {
+  const name = $('scheme-name').value.trim();
+  if (!name) {
+    setStatus($('scheme-status'), 'Name the template before saving it.', 'err');
+    return;
+  }
+
+  const saved = schemeStore.save(name, schemeFieldValues());
+  if (!saved) {
+    setStatus($('scheme-status'), 'Pin at least one field before saving a template.', 'err');
+    return;
+  }
+
+  renderSchemePresets(saved[0].id);
+  setStatus($('scheme-status'), 'Saved "' + saved[0].name + '".', 'ok');
+});
+
+$('scheme-delete-btn').addEventListener('click', () => {
+  const preset = schemeStore.find($('scheme-preset').value);
+  if (!preset || preset.builtin) return;
+
+  schemeStore.remove(preset.id);
+  // The fields stay as they are: deleting a template should not quietly change
+  // what the next generation is pinned to.
+  renderSchemePresets('');
+  setStatus($('scheme-status'), 'Deleted "' + preset.name + '". The pinned fields are unchanged.', 'ok');
+});
+
+$('scheme-clear-btn').addEventListener('click', () => {
+  fillSchemeFields(null);
+  $('scheme-name').value = '';
+  renderSchemePresets('');
+  syncSchemeStatus();
+});
+
+$('scheme-capture-btn').addEventListener('click', () => {
+  const measured = lastResult && lastResult.prosody;
+  if (typeof measured?.syllables_per_line?.avg !== 'number') return;
+
+  const scheme = measured.rhyme_scheme;
+  fillSchemeFields({
+    // "mixed" and "unknown" are what the analyser says when it could not name a
+    // shape; neither is an instruction the generator can follow.
+    rhyme_scheme: scheme && scheme !== 'mixed' && scheme !== 'unknown' ? scheme : '',
+    syllables_avg: Math.round(measured.syllables_per_line.avg),
+    syllables_min: measured.syllables_per_line.min,
+    syllables_max: measured.syllables_per_line.max,
+    internal_rhyme_density: measured.internal_rhyme_density,
+  });
+
+  renderSchemePresets('');
+  syncSchemeStatus();
+});
+
+renderSchemePresets('');
+syncSchemeStatus();
+syncSchemeCapture();
+
 $('rewrite-btn').addEventListener('click', async () => {
   const status = $('rewrite-status');
   const button = $('rewrite-btn');
@@ -1292,6 +1464,7 @@ $('rewrite-btn').addEventListener('click', async () => {
         cadence_profile_id: $('cadence-profile').value,
         imagery_profile_id: $('imagery-profile').value,
         tone: $('tone-mode').value,
+        scheme: currentScheme(),
       }),
     });
     if (!response.ok) throw await asError(response);
@@ -1310,6 +1483,7 @@ $('rewrite-btn').addEventListener('click', async () => {
     renderLyrics(lastResult);
     renderRhymeLegend(lastResult);
     syncRhymeToggle();
+    syncSchemeCapture();
     renderBarGrid(lastResult);
     syncSectionPicker(result.structured_lyrics);
     rememberDraft(lastResult, result.section);

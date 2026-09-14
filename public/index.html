@@ -458,6 +458,58 @@
         <pre id="lyrics-out"></pre>
         <div id="retrieval-meta" class="meta"></div>
 
+        <h3>Rhyme scheme</h3>
+        <p class="hint">
+          Pins the mechanics for the next generation and for every section rewrite.
+          Anything left blank follows the reference style instead. Presets are saved in
+          this browser only.
+        </p>
+        <div class="row">
+          <div class="field">
+            <label for="scheme-preset">Preset</label>
+            <select id="scheme-preset"></select>
+          </div>
+          <div class="field">
+            <label for="scheme-pattern">Scheme</label>
+            <input id="scheme-pattern" placeholder="AABB" maxlength="16" autocomplete="off">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="scheme-avg">Syllables — target</label>
+            <input id="scheme-avg" type="number" min="1" max="40" placeholder="any">
+          </div>
+          <div class="field">
+            <label for="scheme-min">Shortest</label>
+            <input id="scheme-min" type="number" min="1" max="40" placeholder="any">
+          </div>
+          <div class="field">
+            <label for="scheme-max">Longest</label>
+            <input id="scheme-max" type="number" min="1" max="40" placeholder="any">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="scheme-density">Internal rhyme</label>
+            <select id="scheme-density">
+              <option value="">Follow the reference style</option>
+              <option value="0.8">Dense — land rhymes inside the line</option>
+              <option value="0.1">Sparse — keep rhyme at line ends</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="scheme-name">Save this as</label>
+            <input id="scheme-name" placeholder="Name this template" maxlength="60" autocomplete="off">
+          </div>
+        </div>
+        <div class="export-row">
+          <button id="scheme-save-btn" type="button" class="btn-icon">Save preset</button>
+          <button id="scheme-capture-btn" type="button" class="btn-icon" disabled>Copy from this sheet</button>
+          <button id="scheme-delete-btn" type="button" class="btn-icon" disabled>Delete preset</button>
+          <button id="scheme-clear-btn" type="button" class="btn-icon">Pin nothing</button>
+        </div>
+        <div id="scheme-status" class="status" role="status" aria-live="polite"></div>
+
         <h3>Rewrite one section</h3>
         <p class="hint">
           Rewrites a single section against the rest of the sheet, leaving every other
@@ -711,6 +763,7 @@
   <!-- All same-origin: helmet's CSP sets script-src 'self', so a CDN tag
        would be blocked outright and inline script is not allowed either. -->
   <script src="drafts.js"></script>
+  <script src="schemes.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
