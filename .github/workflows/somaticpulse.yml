@@ -1,0 +1,92 @@
+name: Build plugin
+
+# Every push builds installable plug-ins for all three desktop platforms and
+# attaches them to the run as downloadable artifacts. A plug-in binary is
+# platform-specific, so this is how you get a .vst3 for a machine you are not
+# building on.
+on:
+  push:
+    paths:
+      - 'SomaticPulse/**'
+      - '.github/workflows/somaticpulse.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: SomaticPulse
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (VST3)
+            os: windows-latest
+            artifact: SomaticPulse-Windows-VST3
+            cmake_args: -A x64
+          - name: macOS (VST3 + AU)
+            os: macos-latest
+            artifact: SomaticPulse-macOS-VST3-AU
+            # Quoted: the semicolon is a CMake list separator, not a shell one.
+            cmake_args: '"-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15'
+          - name: Linux (VST3)
+            os: ubuntu-latest
+            artifact: SomaticPulse-Linux-VST3
+            cmake_args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libfreetype6-dev \
+            libfontconfig1-dev libx11-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxcursor-dev libxcomposite-dev libgl1-mesa-dev
+
+      # JUCE is fetched by CMake; caching it keeps a rebuild to a couple of
+      # minutes instead of re-cloning the framework every run.
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: SomaticPulse/build/_deps
+          key: juce-${{ runner.os }}-8.0.15
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DSOMATICPULSE_COPY_PLUGIN_AFTER_BUILD=OFF
+          -DSOMATICPULSE_BUILD_TOOLS=ON
+          ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      # The harness drives the real processor and measures its output, so a
+      # regression in the DSP fails the build rather than shipping quietly.
+      - name: Verify the engine
+        if: runner.os == 'Linux'
+        run: ./build/SomaticPulseVerify_artefacts/Release/SomaticPulseVerify
+
+      - name: Collect artefacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp -R build/SomaticPulse_artefacts/Release/VST3/SomaticPulse.vst3 dist/
+          if [ -d build/SomaticPulse_artefacts/Release/AU/SomaticPulse.component ]; then
+            cp -R build/SomaticPulse_artefacts/Release/AU/SomaticPulse.component dist/
+          fi
+          if [ -d build/SomaticPulse_artefacts/Release/Standalone ]; then
+            cp -R build/SomaticPulse_artefacts/Release/Standalone dist/
+          fi
+          cp README.md dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: SomaticPulse/dist/
+          if-no-files-found: error
