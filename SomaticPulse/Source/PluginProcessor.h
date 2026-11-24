@@ -5,8 +5,11 @@
 #include "DSP/BinauralOscillator.h"
 #include "DSP/PhaseSafeCrossover.h"
 #include "DSP/ScopeBuffer.h"
+#include "DSP/LoudnessMeter.h"
+#include "DSP/SessionClock.h"
 #include "DSP/SolfeggioResonator.h"
 #include "DSP/SomaticPulseLFO.h"
+#include "DSP/TactileSend.h"
 
 namespace SomaticPulse
 {
@@ -53,6 +56,27 @@ public:
     /** Peak output since the last read, for the clip meter. UI thread. */
     float getOutputPeakForUI() const noexcept            { return outputPeakForUI.load (std::memory_order_relaxed); }
 
+    /** Momentary K-weighted loudness of the main bus. UI thread. */
+    float getLoudnessForUI() const noexcept              { return loudnessForUI.load (std::memory_order_relaxed); }
+
+    /** Loudest 400 ms window of this session. UI thread. */
+    float getLoudnessMaxForUI() const noexcept           { return loudnessMaxForUI.load (std::memory_order_relaxed); }
+
+    /** Seconds elapsed in the current session, 0 when the clock is off. */
+    float getSessionElapsedForUI() const noexcept        { return sessionElapsedForUI.load (std::memory_order_relaxed); }
+
+    /** Session length in seconds, 0 when the clock is off. */
+    float getSessionLengthForUI() const noexcept         { return sessionLengthForUI.load (std::memory_order_relaxed); }
+
+    /** The session envelope currently applied to generated content. */
+    float getSessionIntensityForUI() const noexcept      { return sessionIntensityForUI.load (std::memory_order_relaxed); }
+
+    /** True when the host exposes the second output bus. UI thread. */
+    bool isTactileBusConnected() const noexcept          { return tactileBusConnected.load (std::memory_order_relaxed); }
+
+    /** Restarts the session clock from zero. Message thread. */
+    void restartSession() noexcept                       { sessionRestartRequested.store (true, std::memory_order_relaxed); }
+
 private:
     /**
         Caches a raw pointer to every parameter's atomic value.
@@ -69,10 +93,24 @@ private:
     SomaticPulseLFO lfo;
     SolfeggioResonator resonator;
     PhaseSafeCrossover outputStage;
+    TactileSend tactile;
+    SessionClock session;
+    LoudnessMeter meter;
     ScopeBuffer scope;
 
     std::atomic<float> lfoValueForUI { 0.0f };
     std::atomic<float> outputPeakForUI { 0.0f };
+    std::atomic<float> loudnessForUI { LoudnessMeter::silenceLufs };
+    std::atomic<float> loudnessMaxForUI { LoudnessMeter::silenceLufs };
+    std::atomic<float> sessionElapsedForUI { 0.0f };
+    std::atomic<float> sessionLengthForUI { 0.0f };
+    std::atomic<float> sessionIntensityForUI { 1.0f };
+    std::atomic<bool> tactileBusConnected { false };
+    std::atomic<bool> sessionRestartRequested { false };
+
+    /** Transport state from the last block, for restarting the session. */
+    bool wasPlaying = false;
+    juce::int64 lastTimeInSamples = 0;
 
     int currentProgram = 0;
 
@@ -81,6 +119,7 @@ private:
     std::atomic<float>* pCarrierHz      = nullptr;
     std::atomic<float>* pBeatHz         = nullptr;
     std::atomic<float>* pOscWave        = nullptr;
+    std::atomic<float>* pBeatMode       = nullptr;
     std::atomic<float>* pOscDrive       = nullptr;
     std::atomic<float>* pSubLevelDb     = nullptr;
 
@@ -101,6 +140,18 @@ private:
     std::atomic<float>* pResoAmount     = nullptr;
     std::atomic<float>* pDetuneEnable   = nullptr;
     std::atomic<float>* pDetuneCents    = nullptr;
+
+    std::atomic<float>* pSessionMinutes = nullptr;
+    std::atomic<float>* pSessionFadePct = nullptr;
+    std::atomic<float>* pRampEnable     = nullptr;
+    std::atomic<float>* pRampBeatHz     = nullptr;
+    std::atomic<float>* pRampRateHz     = nullptr;
+
+    std::atomic<float>* pTactileEnable  = nullptr;
+    std::atomic<float>* pTactileRouting = nullptr;
+    std::atomic<float>* pTactileLevelDb = nullptr;
+    std::atomic<float>* pTactileHpHz    = nullptr;
+    std::atomic<float>* pTactileLpHz    = nullptr;
 
     std::atomic<float>* pDuckEnable     = nullptr;
     std::atomic<float>* pDuckAmount     = nullptr;

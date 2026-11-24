@@ -20,12 +20,17 @@ namespace SomaticPulse
       right filter here because its two bands reconstruct flat: a Butterworth
       pair would leave a +3 dB bump at the crossover.
 
-      Note the real trade-off this exposes. A binaural beat *is* a
-      left/right difference, so monoing the band it lives in cancels it.
-      That is why headphone mode bypasses the summing rather than trying to
-      have both - the two goals are mutually exclusive below the corner, and
-      pretending otherwise would just produce a beat that quietly does
-      nothing on speakers.
+      Note what this does to a binaural beat, precisely. Summing the band
+      does not cancel the beat: two carriers a few hertz apart added
+      together still beat, acoustically, at the difference frequency. What
+      summing removes is the *dichotic* presentation - both ears now get the
+      same signal - so the effect stops being the neural one a binaural beat
+      is chosen for and becomes ordinary amplitude modulation.
+
+      Headphone mode bypasses the summing for anyone who wants the neural
+      version. Anyone on speakers is better served by the oscillator's
+      Monaural or Isochronic mode, which put the modulation in the signal
+      deliberately instead of relying on a summing artefact.
 
     - **Safety.** A 5 Hz DC blocker and a soft ceiling, so nothing downstream
       sees a DC offset or an over.

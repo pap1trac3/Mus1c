@@ -19,6 +19,11 @@ namespace SomaticPulse::ParamID
     inline constexpr auto carrierHz   = "carrier_hz";
     inline constexpr auto beatHz      = "beat_hz";
     inline constexpr auto oscWave     = "osc_wave";
+    // Binaural / Monaural / Isochronic. A binaural beat only exists across two
+    // ears, so on speakers or a tactile transducer it is silent - the other two
+    // modes put the beat in the amplitude envelope, where a single transducer
+    // can reproduce it.
+    inline constexpr auto beatMode    = "beat_mode";
     inline constexpr auto oscDrive    = "osc_drive";
     inline constexpr auto subLevelDb  = "sub_level_db";
 
@@ -41,6 +46,20 @@ namespace SomaticPulse::ParamID
     inline constexpr auto resoAmount    = "reso_amount";
     inline constexpr auto detuneEnable  = "detune_enable";
     inline constexpr auto detuneCents   = "detune_cents";
+
+    // --- Session timing -----------------------------------------------------
+    inline constexpr auto sessionMinutes = "session_minutes";
+    inline constexpr auto sessionFadePct = "session_fade_pct";
+    inline constexpr auto rampEnable     = "ramp_enable";
+    inline constexpr auto rampBeatHz     = "ramp_beat_hz";
+    inline constexpr auto rampRateHz     = "ramp_rate_hz";
+
+    // --- Tactile transducer send -------------------------------------------
+    inline constexpr auto tactileEnable  = "tactile_enable";
+    inline constexpr auto tactileRouting = "tactile_routing";
+    inline constexpr auto tactileLevelDb = "tactile_level_db";
+    inline constexpr auto tactileHpHz    = "tactile_hp_hz";
+    inline constexpr auto tactileLpHz    = "tactile_lp_hz";
 
     // --- Mix, dynamics and phase safety ------------------------------------
     inline constexpr auto duckEnable    = "duck_enable";

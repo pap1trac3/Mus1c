@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <functional>
 #include <memory>
 
 #include "PluginProcessor.h"
@@ -95,6 +96,59 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SwitchControl)
 };
 
+/**
+    Where the carrier sits relative to how the body reads vibration.
+
+    The numbers behind the zones: fingertip vibrotactile sensitivity peaks
+    near 250 Hz through the Pacinian channel, which spans roughly 65-400 Hz,
+    while a bench study of seven consumer vibrators measured them between 43
+    and 148 Hz. Below about 60 Hz is felt as pressure and movement rather
+    than vibration, and above 400 Hz the sensation thins out into tone.
+
+    None of that is visible on a frequency knob, so the strip draws it.
+*/
+class CarrierScale final : public juce::Component
+{
+public:
+    CarrierScale (juce::AudioProcessorValueTreeState& state, const juce::String& parameterID);
+
+    void paint (juce::Graphics&) override;
+
+    /** Repaints only when the carrier has actually moved. */
+    void refresh();
+
+private:
+    static constexpr float minHz = 30.0f;
+    static constexpr float maxHz = 528.0f;
+
+    static float positionFor (float hz);
+
+    juce::RangedAudioParameter* parameter = nullptr;
+    float lastValue = -1.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CarrierScale)
+};
+
+/** Caption plus a live value, polled by the editor rather than pushed. */
+class ValueReadout final : public juce::Component
+{
+public:
+    using Provider = std::function<juce::String()>;
+
+    ValueReadout (juce::String caption, Provider provider, juce::Colour colour);
+
+    void paint (juce::Graphics&) override;
+    void refresh();
+
+private:
+    juce::String captionText;
+    juce::String cachedValue;
+    Provider read;
+    juce::Colour valueColour;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ValueReadout)
+};
+
 /** Frosted panel with a titled header. Purely a background. */
 class GlassCard final : public juce::Component
 {
@@ -130,7 +184,7 @@ private:
     void buildPresetBox();
 
     static constexpr int designWidth = 920;
-    static constexpr int designHeight = 560;
+    static constexpr int designHeight = 754;
 
     SomaticPulseProcessor& processor;
     CustomLookAndFeel customLookAndFeel;
@@ -153,6 +207,8 @@ private:
     GlassCard pulseCard;
     GlassCard resonanceCard;
     GlassCard mixCard;
+    GlassCard sessionCard;
+    GlassCard tactileCard;
 
     WaveformVisualizer visualizer;
 
@@ -164,9 +220,11 @@ private:
     SwitchControl oscEnableSwitch;
     KnobControl carrierKnob;
     KnobControl beatKnob;
+    CarrierScale carrierScale;
     KnobControl subLevelKnob;
     KnobControl driveKnob;
     ChoiceControl waveChoice;
+    ChoiceControl beatModeChoice;
 
     SwitchControl lfoEnableSwitch;
     SwitchControl lfoSyncSwitch;
@@ -192,6 +250,23 @@ private:
     KnobControl duckReleaseKnob;
     KnobControl crossoverKnob;
     KnobControl dryWetKnob;
+
+    SwitchControl rampSwitch;
+    KnobControl sessionLengthKnob;
+    KnobControl sessionFadeKnob;
+    KnobControl rampBeatKnob;
+    KnobControl rampRateKnob;
+    juce::TextButton restartButton { "RESTART" };
+    ValueReadout elapsedReadout;
+    ValueReadout loudnessReadout;
+    ValueReadout loudnessMaxReadout;
+
+    SwitchControl tactileSwitch;
+    ChoiceControl tactileRoutingChoice;
+    KnobControl tactileLevelKnob;
+    KnobControl tactileHpKnob;
+    KnobControl tactileLpKnob;
+    ValueReadout tactileStatusReadout;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SomaticPulseEditor)
 };

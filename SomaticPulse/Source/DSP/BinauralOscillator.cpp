@@ -25,6 +25,7 @@ void BinauralOscillator::reset() noexcept
     // is what a listener expects when they hit play.
     phaseL = 0.0;
     phaseR = 0.0;
+    gatePhase = 0.0;
 }
 
 void BinauralOscillator::snapToTargets() noexcept

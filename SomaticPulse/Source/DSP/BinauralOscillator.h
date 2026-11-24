@@ -28,6 +28,38 @@ public:
         Triangle
     };
 
+    /**
+        How the beat is produced.
+
+        Binaural puts a different frequency in each ear. Each channel on its
+        own is a steady tone with no amplitude modulation at all - the beat
+        is produced neurally, from the two being heard separately, which
+        needs headphones. Hand one of those channels to a single transducer
+        and it reproduces no pulse whatsoever.
+
+        Monaural sums both carriers into both channels. The beat is then
+        ordinary acoustic amplitude modulation present in the signal itself,
+        so it is there in any single channel and immune to anything
+        downstream that sums to mono.
+
+        Isochronic drops the second carrier and gates one tone on and off at
+        the beat rate. It is the strongest of the three through a transducer,
+        because the envelope goes fully to zero rather than just dipping
+        where two nearby partials cancel.
+
+        Note what mono-summing a binaural pair actually does: it does not
+        destroy the beat, it converts it. Two carriers 8 Hz apart added
+        together beat acoustically at 8 Hz. What is lost is the dichotic
+        presentation - the same signal now reaches both ears - so the
+        phenomenon stops being neural and starts being air.
+    */
+    enum class Mode
+    {
+        Binaural = 0,
+        Monaural,
+        Isochronic
+    };
+
     void prepare (const juce::dsp::ProcessSpec& spec);
     void reset() noexcept;
 
@@ -44,6 +76,7 @@ public:
     void setLevel (float linearGain) noexcept        { level.setTargetValue (linearGain); }
 
     void setWaveform (Waveform w) noexcept           { waveform = w; }
+    void setMode (Mode m) noexcept                   { mode = m; }
 
     /** Jumps every smoother to its target - use after a preset change. */
     void snapToTargets() noexcept;
@@ -66,13 +99,48 @@ public:
         const auto d     = drive.getNextValue();
         const auto lvl   = level.getNextValue();
 
+        if (mode == Mode::Isochronic)
+        {
+            // One carrier, gated by a raised cosine at the beat rate. The
+            // gate is sine-squared rather than square so the edges cannot
+            // click, and it reaches zero so the pulse is unambiguous through
+            // a transducer.
+            const auto gate = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi
+                                                      * static_cast<float> (gatePhase));
+
+            const auto tone = saturate (oscillate (phaseL), d) * gate;
+
+            outL = tone * lvl * gainScaleL;
+            outR = tone * lvl * gainScaleR;
+
+            phaseL += static_cast<double> (juce::jmax (0.0f, fc)) * phaseIncrementPerHz;
+            gatePhase += static_cast<double> (juce::jmax (0.0f, delta)) * phaseIncrementPerHz;
+
+            if (phaseL >= 1.0)    phaseL    -= std::floor (phaseL);
+            if (gatePhase >= 1.0) gatePhase -= std::floor (gatePhase);
+
+            // Keep the second accumulator in step so switching modes does not
+            // jump the phase.
+            phaseR = phaseL;
+            return;
+        }
+
         // Clamp at zero: a negative frequency would run the phase backwards
         // and swap which ear leads, which is audible as a click.
         const auto fL = juce::jmax (0.0f, fc - delta * 0.5f);
         const auto fR = juce::jmax (0.0f, fc + delta * 0.5f);
 
-        const auto sampleL = saturate (oscillate (phaseL), d);
-        const auto sampleR = saturate (oscillate (phaseR), d);
+        auto sampleL = saturate (oscillate (phaseL), d);
+        auto sampleR = saturate (oscillate (phaseR), d);
+
+        if (mode == Mode::Monaural)
+        {
+            // Both carriers in both channels. Halved so two summed tones peak
+            // at the same level a single one does.
+            const auto summed = 0.5f * (sampleL + sampleR);
+            sampleL = summed;
+            sampleR = summed;
+        }
 
         outL = sampleL * lvl * gainScaleL;
         outR = sampleR * lvl * gainScaleR;
@@ -128,6 +196,7 @@ private:
 
     double phaseL = 0.0;
     double phaseR = 0.0;
+    double gatePhase = 0.0;
     double phaseIncrementPerHz = 1.0 / 44100.0;
 
     juce::SmoothedValue<float> carrierHz { 111.0f };
@@ -136,5 +205,6 @@ private:
     juce::SmoothedValue<float> level     { 0.0f };
 
     Waveform waveform = Waveform::Sine;
+    Mode mode = Mode::Binaural;
 };
 } // namespace SomaticPulse

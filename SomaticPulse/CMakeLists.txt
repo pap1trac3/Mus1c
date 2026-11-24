@@ -71,6 +71,8 @@ set(SOMATICPULSE_SOURCES
     Source/DSP/SolfeggioResonator.cpp
     Source/DSP/SomaticPulseLFO.cpp
     Source/DSP/PhaseSafeCrossover.cpp
+    Source/DSP/TactileSend.cpp
+    Source/DSP/LoudnessMeter.cpp
     Source/UI/CustomLookAndFeel.cpp
     Source/UI/WaveformVisualizer.cpp)
 
